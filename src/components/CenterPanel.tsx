@@ -87,9 +87,7 @@ function drawCanvas(
   endSlice: number,
   viewMode: "heatmap" | "spectrogram",
   currentTime: number,
-  duration: number,
-  vocalData: number[] | null,
-  showVocals: boolean
+  duration: number
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -157,52 +155,6 @@ function drawCanvas(
 
   ctx.restore();
 
-  // ── Vocal/Lyrics Presence Overlay ──
-  if (showVocals && vocalData && vocalData.length > 0) {
-    ctx.save();
-    ctx.strokeStyle = "rgba(239, 68, 68, 0.85)"; // Tailwind red-500
-    ctx.lineWidth = 2;
-    ctx.lineJoin = "round";
-
-    // Create fill gradient
-    const grad = ctx.createLinearGradient(0, H, 0, H - (H * 0.3));
-    grad.addColorStop(0, "rgba(239, 68, 68, 0.3)");
-    grad.addColorStop(1, "rgba(239, 68, 68, 0.05)");
-
-    ctx.beginPath();
-    // Start from bottom left
-    ctx.moveTo(0, H);
-
-    for (let t = 0; t < T; t++) {
-      const v = vocalData[startSlice + t] || 0;
-      const x = t * cW + (cW / 2);
-      // Map vocal presence (0-1) to the bottom 30% of the canvas height
-      const y = H - (v * (H * 0.3));
-      ctx.lineTo(x, y);
-    }
-
-    ctx.lineTo(W, H);
-    ctx.closePath();
-    ctx.fillStyle = grad;
-    ctx.fill();
-
-    // Draw the line on top
-    ctx.beginPath();
-    for (let t = 0; t < T; t++) {
-      const v = vocalData[startSlice + t] || 0;
-      const x = t * cW + (cW / 2);
-      const y = H - (v * (H * 0.3));
-      if (t === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-
-    // Add text label
-    ctx.fillStyle = "rgba(239, 68, 68, 0.9)";
-    ctx.font = "bold 9px 'JetBrains Mono', monospace";
-    ctx.fillText("Vocal/Lyrics Intensity", 10, H - (H * 0.3) - 5);
-    ctx.restore();
-  }
 
   // Playhead
   if (duration > 0 && currentTime > 0) {
@@ -232,7 +184,7 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
   const lastDragX = useRef(0);
 
   const [viewMode, setViewMode] = useState<"heatmap" | "spectrogram">("heatmap");
-  const [showVocals, setShowVocals] = useState(false);
+  const [lyricsOpen, setLyricsOpen] = useState(false);
   const [zoomX, setZoomX] = useState(1);
   const [panX, setPanX] = useState(0); // 0..1
   const [animTime, setAnimTime] = useState(0);
@@ -273,8 +225,8 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
     canvas.width = wrapper.clientWidth;
     canvas.height = wrapper.clientHeight;
 
-    drawCanvas(canvas, activeData, startSlice, endSlice, viewMode, currentTime, duration, analysisResult?.vocalPresence || null, showVocals);
-  }, [activeData, startSlice, endSlice, viewMode, currentTime, duration, analysisResult, showVocals]);
+    drawCanvas(canvas, activeData, startSlice, endSlice, viewMode, currentTime, duration);
+  }, [activeData, startSlice, endSlice, viewMode, currentTime, duration]);
 
   useEffect(() => { render(); }, [render]);
 
@@ -329,27 +281,20 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
 
   const yLabels = viewMode === "heatmap" ? SOLFEGE_LABELS : null;
 
-  // Find active lyric based on currentTime
-  let activeLyric = "";
-  let noLyrics = false;
-  if (isReady && showVocals) {
-    if (!analysisResult?.lyrics || analysisResult.lyrics.length === 0) {
-      noLyrics = true;
-    } else {
-      // Find lyric chunk matching currentTime
-      const chunk = analysisResult.lyrics.find(
-        c => currentTime >= c.timestamp[0] && currentTime <= c.timestamp[1]
-      );
-      // Also show nearest upcoming chunk if between timestamps
-      if (!chunk && currentTime > 0) {
-        const next = analysisResult.lyrics.find(c => c.timestamp[0] > currentTime);
-        const prev = [...analysisResult.lyrics].reverse().find(c => c.timestamp[1] < currentTime);
-        activeLyric = prev?.text || next?.text || "";
-      } else {
-        activeLyric = chunk?.text || "";
-      }
+  // ── Lyrics matching: find active index based on currentTime ──
+  const lyrics = isReady ? (analysisResult?.lyrics ?? []) : [];
+  const hasLyrics = lyrics.length > 0;
+
+  // Active = last chunk whose start <= currentTime
+  const activeIdx = useMemo(() => {
+    if (!hasLyrics || currentTime <= 0) return -1;
+    let idx = -1;
+    for (let i = 0; i < lyrics.length; i++) {
+      if (lyrics[i].timestamp[0] <= currentTime) idx = i;
+      else break;
     }
-  }
+    return idx;
+  }, [lyrics, currentTime, hasLyrics]);
 
   return (
     <div className="panel-center">
@@ -362,16 +307,6 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
           </button>
           <button className={`toolbar-btn ${viewMode === "spectrogram" ? "toolbar-btn--active" : ""}`} onClick={() => setViewMode("spectrogram")}>
             Spectrogram
-          </button>
-          <div className="toolbar-separator" />
-          <span className="toolbar-label">Vocals:</span>
-          <button
-            className={`toolbar-btn ${showVocals ? "toolbar-btn--active" : ""}`}
-            onClick={() => setShowVocals(s => !s)}
-            disabled={!isReady}
-            style={{ opacity: !isReady ? 0.5 : 1 }}
-          >
-            {showVocals ? "Hide Lyrics/Vocals" : "Show Lyrics/Vocals"}
           </button>
           <div className="toolbar-separator" />
           <span className="toolbar-label">Zoom:</span>
@@ -450,32 +385,6 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
               ← {viewMode === "spectrogram" ? "Freq. amplitude over time" : "Melodic notation over time"}&nbsp;
               ({duration > 0 ? `${Math.floor(duration / 60)}:${String(Math.floor(duration % 60)).padStart(2, "0")}` : "--:--"}) →
             </span>
-            {showVocals && (
-              noLyrics ? (
-                <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-dim)", fontStyle: "italic" }}>
-                  ♪ No lyrics detected
-                </span>
-              ) : activeLyric ? (
-                <span style={{
-                  fontFamily: "var(--font-mono)",
-                  fontSize: "11px",
-                  color: "#ef4444",
-                  fontWeight: "bold",
-                  textShadow: "0 1px 6px rgba(239,68,68,0.5)",
-                  animation: "pulse 1.5s infinite",
-                  maxWidth: "60%",
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                }}>
-                  ♪ {activeLyric}
-                </span>
-              ) : (
-                <span style={{ fontFamily: "var(--font-mono)", fontSize: "9px", color: "var(--text-dim)" }}>
-                  ♪ Play to see lyrics
-                </span>
-              )
-            )}
           </div>
         </div>
       ) : (
@@ -484,6 +393,59 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
           <div className="empty-state__text">
             {analysisState === "processing" ? "Analyzing..." : analysisState === "loaded" ? 'Press "Analyze"' : "Upload MP3/WAV"}
           </div>
+        </div>
+      )}
+
+      {/* ── Lyrics Drawer (collapsible, bottom) ── */}
+      {isReady && (
+        <div className="lyrics-drawer">
+          <button
+            className="lyrics-drawer__toggle"
+            onClick={() => setLyricsOpen(o => !o)}
+          >
+            <span className="lyrics-drawer__toggle-icon">{lyricsOpen ? "▾" : "▸"}</span>
+            <span>Lyrics</span>
+            {hasLyrics && activeIdx >= 0 && (
+              <span className="lyrics-drawer__badge">
+                {activeIdx + 1} / {lyrics.length}
+              </span>
+            )}
+            <span style={{ marginLeft: "auto", fontSize: "8px", color: "var(--text-dim)" }}>
+              {hasLyrics ? "LRCLIB synced" : "No lyrics"}
+            </span>
+          </button>
+
+          {lyricsOpen && (
+            <div className="lyrics-drawer__body">
+              {!hasLyrics ? (
+                <div className="lyrics-empty">♪ Lyrics tidak tersedia untuk lagu ini</div>
+              ) : (
+                <div className="lyrics-scroll">
+                  {/* Show window: 2 before active, active, 2 after */}
+                  {[-2, -1, 0, 1, 2].map(offset => {
+                    const idx = activeIdx + offset;
+                    if (idx < 0 || idx >= lyrics.length) return null;
+                    const chunk = lyrics[idx];
+                    const isActive = offset === 0;
+                    const isPrev = offset < 0;
+                    return (
+                      <div
+                        key={idx}
+                        className={`lyric-line ${
+                          isActive ? "lyric-line--active" : isPrev ? "lyric-line--prev" : "lyric-line--next"
+                        }`}
+                      >
+                        {chunk.text}
+                      </div>
+                    );
+                  })}
+                  {activeIdx < 0 && (
+                    <div className="lyrics-empty">♪ Play to see lyrics</div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
