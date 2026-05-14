@@ -8,28 +8,26 @@ interface TitleBarProps { state: AnalysisState; }
 export default function TitleBar({ state }: TitleBarProps) {
   const { lang, toggle } = useLang();
 
-  const stateLabels: Record<AnalysisState, Record<"id"|"en", string>> = {
-    idle:       { id: "IDLE",             en: "IDLE" },
-    loaded:     { id: "FILE DIMUAT",      en: "FILE LOADED" },
-    processing: { id: "MENGANALISIS...",  en: "ANALYZING..." },
-    complete:   { id: "ANALISIS SELESAI", en: "ANALYSIS COMPLETE" },
+  const stateLabels: Record<AnalysisState, Record<"id" | "en", string>> = {
+    idle: { id: "IDLE", en: "IDLE" },
+    loaded: { id: "FILE DIMUAT", en: "FILE LOADED" },
+    processing: { id: "MENGANALISIS...", en: "ANALYZING..." },
+    complete: { id: "ANALISIS SELESAI", en: "ANALYSIS COMPLETE" },
   };
 
   return (
     <div className="titlebar">
       <div className="titlebar__brand">
-        <span className="titlebar__brand-icon">♪</span>
         <span>Solfeggio Analyzer</span>
         <span style={{ color: "var(--text-dim)", fontWeight: 400 }}>v1.2.0</span>
       </div>
       <div className="titlebar__controls">
         <div className="titlebar__status">
           <span
-            className={`titlebar__status-dot ${
-              state === "idle" ? "titlebar__status-dot--idle"
-              : state === "processing" ? "titlebar__status-dot--processing"
-              : ""
-            }`}
+            className={`titlebar__status-dot ${state === "idle" ? "titlebar__status-dot--idle"
+                : state === "processing" ? "titlebar__status-dot--processing"
+                  : ""
+              }`}
           />
           <span>{stateLabels[state][lang]}</span>
         </div>

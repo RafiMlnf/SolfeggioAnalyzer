@@ -23,18 +23,20 @@ export async function POST(req: Request) {
     const prompt = `Data Musik:
 - Nada Dasar: ${key} ${mode}
 - Tempo: ${bpm} BPM
-- Mood: ${mood}
-- Nada Paling Dominan: ${topSolfegge}
+- Mood Audio: ${mood}
+- Nada Dominan: ${topSolfegge}
 
 Lirik Lagu:
 "${truncatedLyrics}"
 
 Tugas:
-Buatlah narasi analisis musik yang mendalam (3-4 kalimat) dalam Bahasa Indonesia.
-1. Hubungkan aspek teknis (seperti tempo ${bpm} BPM atau nada dasar ${key}) dengan makna emosional dari lirik tersebut.
-2. Jangan hanya menyebutkan angka, tapi jelaskan *bagaimana* musiknya mendukung pesan dalam lirik.
-3. Gunakan gaya bahasa yang puitis, santai/informal namun tetap berwawasan musik. analisis dan libatkan lirik musik untuk results nya, apa makna lagu ini berdasarkan lirik.
-4. JANGAN gunakan awalan seperti "Analisis lagu ini adalah..." atau "Tentu, ini analisanya". Langsung ke inti narasi. dan juga singkat`;
+Analisis makna lagu ini berdasarkan liriknya. Gunakan kepintaranmu untuk memahami metafora, sindiran, atau makna tersirat (misal: lagu sedih yang dibalut nada ceria).
+
+Keluarkan jawaban HANYA dalam format JSON yang valid, dengan struktur persis seperti ini:
+{
+  "narrative": "Narasi analisis mendalam (3-4 kalimat) dalam Bahasa Indonesia. Hubungkan antara makna lirik dengan aspek teknis audio (tempo, nada dasar). Gunakan gaya puitis, santai/informal namun berwawasan. Langsung ke inti.",
+  "lyricMood": "Pilih SATU klasifikasi yang paling tepat dari 5 opsi ini: Happy, Sad, Romantic, Angry, Reflective"
+}`;
 
     const groqRes = await fetch(GROQ_URL, {
       method: 'POST',
@@ -43,16 +45,17 @@ Buatlah narasi analisis musik yang mendalam (3-4 kalimat) dalam Bahasa Indonesia
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'llama-3.3-70b-versatile', // Newer, more reliable model
+        model: 'llama-3.3-70b-versatile',
         messages: [
           {
             role: 'system',
-            content: 'Anda adalah kritikus musik Indonesia yang cerdas. Berikan analisis mendalam dalam Bahasa Indonesia yang indah. Hubungkan antara lirik dan musik.'
+            content: 'Anda adalah kritikus musik dan analis sastra Indonesia. Anda HANYA membalas dengan JSON yang valid, tanpa markdown tambahan.'
           },
           { role: 'user', content: prompt }
         ],
         temperature: 0.5,
-        max_tokens: 400,
+        max_tokens: 500,
+        response_format: { type: "json_object" }
       }),
     });
 
@@ -66,17 +69,26 @@ Buatlah narasi analisis musik yang mendalam (3-4 kalimat) dalam Bahasa Indonesia
     const data = await groqRes.json();
     console.log('Groq Response Data:', JSON.stringify(data).substring(0, 200));
 
-    const narrative = data.choices?.[0]?.message?.content?.trim() || '';
-
-    if (!narrative) {
-      console.warn('Groq returned empty narrative content');
+    const contentString = data.choices?.[0]?.message?.content?.trim() || '{}';
+    let parsedContent;
+    try {
+      parsedContent = JSON.parse(contentString);
+    } catch (e) {
+      console.error("Failed to parse Groq JSON:", e);
+      parsedContent = {
+        narrative: contentString,
+        lyricMood: "Reflective"
+      };
     }
 
-    return NextResponse.json({ narrative });
+    return NextResponse.json({ 
+      narrative: parsedContent.narrative || "Gagal menghasilkan narasi.",
+      lyricMood: parsedContent.lyricMood || "Reflective"
+    });
   } catch (error) {
     console.error('Narrative generation error:', error);
     // Return a fallback explanation if API fails
-    const fallback = `Lagu ini memiliki tempo ${body.bpm || 0} BPM dengan nuansa ${body.mood || 'netral'}.`;
-    return NextResponse.json({ error: String(error), fallback });
+    const fallback = `Lagu ini memiliki nuansa yang unik berdasarkan komposisinya.`;
+    return NextResponse.json({ error: String(error), fallback, lyricMood: "Reflective" });
   }
 }

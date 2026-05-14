@@ -35,27 +35,27 @@ function parseLrc(lrc: string) {
   }));
 }
 
-// ── Mode B: Groq Whisper ──────────────────────────────────────
-async function transcribeWithGroq(audioFile: File, songId: string, force: boolean) {
+// ── Mode B: Groq Whisper (Internal) ───────────────────────────
+async function transcribeWithGroqInternal(audioFile: File, songId: string, force: boolean) {
   const cacheKey = `lyrics:whisper:${songId}`;
 
   // Check cache first
   if (!force) {
     try {
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-      console.log(`[Whisper/Redis HIT] ${cacheKey}`);
-      const parsed = typeof cached === 'string' ? JSON.parse(cached) : cached;
-      return NextResponse.json({ result: parsed, cached: true, source: 'groq-whisper' });
+      const cached = await redis.get(cacheKey);
+      if (cached) {
+        console.log(`[Whisper/Redis HIT] ${cacheKey}`);
+        return typeof cached === 'string' ? JSON.parse(cached) : cached;
+      }
+    } catch (e) {
+      console.error('[Whisper] Redis read error:', e);
     }
-  } catch (e) {
-    console.error('[Whisper] Redis read error:', e);
   }
-}
 
   const apiKey = process.env.GROQ_API_KEY;
   if (!apiKey) {
-    return NextResponse.json({ error: 'GROQ_API_KEY not configured' }, { status: 500 });
+    console.error('GROQ_API_KEY not configured');
+    return null;
   }
 
   console.log(`[Whisper] Sending ${(audioFile.size / 1024).toFixed(0)}KB to Groq Whisper...`);
@@ -78,7 +78,7 @@ async function transcribeWithGroq(audioFile: File, songId: string, force: boolea
   if (!groqRes.ok) {
     const err = await groqRes.text();
     console.error('[Whisper] Groq API error:', err);
-    return NextResponse.json({ error: 'Groq Whisper failed', detail: err }, { status: 502 });
+    return null;
   }
 
   const whisperData = await groqRes.json();
@@ -104,7 +104,7 @@ async function transcribeWithGroq(audioFile: File, songId: string, force: boolea
     }
   }
 
-  return NextResponse.json({ result, cached: false, source: 'groq-whisper' });
+  return result;
 }
 
 // ── Main handler ──────────────────────────────────────────────
@@ -115,17 +115,12 @@ export async function POST(req: Request) {
     const audioFile = formData.get('audio') as File | null;
     const force = formData.get('force') === 'true';
 
-    // ── Mode B: Groq Whisper (audio file present) ──
-    if (audioFile && audioFile.size > 0) {
-      return transcribeWithGroq(audioFile, songId, force);
-    }
-
-    // ── Mode A: LRCLIB ──
+    // ── Mode A: Direct LRCLIB Search (using Filename/SongId) ──
     if (!songId) {
       return NextResponse.json({ error: 'songId is required' }, { status: 400 });
     }
 
-    const searchQuery = songId
+    const cleanSongId = songId
       .replace(/official/gi, '')
       .replace(/video/gi, '')
       .replace(/audio/gi, '')
@@ -134,7 +129,7 @@ export async function POST(req: Request) {
       .replace(/\s+/g, ' ')
       .trim();
 
-    const cacheKey = `lyrics:lrc:${searchQuery}`;
+    const cacheKey = `lyrics:lrc:${cleanSongId}`;
 
     if (!force) {
       try {
@@ -149,18 +144,44 @@ export async function POST(req: Request) {
       }
     }
 
-    console.log(`[LRCLIB] Searching for "${searchQuery}"...`);
-    const lrclibRes = await fetch(`https://lrclib.net/api/search?q=${encodeURIComponent(searchQuery)}`);
-
-    if (!lrclibRes.ok) {
-      return NextResponse.json({ error: 'Failed to search LRCLIB' }, { status: 502 });
+    console.log(`[LRCLIB] Searching for "${cleanSongId}"...`);
+    let lrclibRes = await fetch(`https://lrclib.net/api/search?q=${encodeURIComponent(cleanSongId)}`);
+    
+    let bestMatch = null;
+    if (lrclibRes.ok) {
+      const results = await lrclibRes.json();
+      bestMatch = results.find((r: any) => r.syncedLyrics);
     }
 
-    const results = await lrclibRes.json();
-    const bestMatch = results.find((r: any) => r.syncedLyrics);
+    // ── Mode B: Whisper-guided LRCLIB Search ──
+    // If filename search failed to find synced lyrics, and we have an audio file
+    if (!bestMatch && audioFile && audioFile.size > 0) {
+      console.log(`[Hybrid] LRCLIB direct failed. Transcribing audio to find song...`);
+      const whisperResult = await transcribeWithGroqInternal(audioFile, songId, force);
+      
+      if (whisperResult && whisperResult.text) {
+        // Use the first ~100 characters of the transcribed lyrics to search LRCLIB
+        const transcribedQuery = whisperResult.text.substring(0, 100).trim();
+        console.log(`[Hybrid] Searching LRCLIB with transcribed lyrics: "${transcribedQuery}"`);
+        
+        lrclibRes = await fetch(`https://lrclib.net/api/search?q=${encodeURIComponent(transcribedQuery)}`);
+        if (lrclibRes.ok) {
+          const results = await lrclibRes.json();
+          bestMatch = results.find((r: any) => r.syncedLyrics);
+        }
 
+        // If LRCLIB STILL fails, fallback to Whisper's own chaotic timestamps
+        if (!bestMatch) {
+          console.log(`[Hybrid] LRCLIB lyric search failed. Falling back to Whisper timestamps.`);
+          return NextResponse.json({ result: whisperResult, cached: false, source: 'groq-whisper' });
+        }
+      }
+    }
+
+    // Process LRCLIB match
     let chunks: any[] = [];
     if (bestMatch?.syncedLyrics) {
+      console.log(`[LRCLIB] Found match: ${bestMatch.artistName} - ${bestMatch.trackName}`);
       chunks = parseLrc(bestMatch.syncedLyrics);
     }
 
@@ -172,6 +193,11 @@ export async function POST(req: Request) {
         console.log(`[LRCLIB/Redis SET] ${cacheKey} (${chunks.length} lines)`);
       } catch (e) {
         console.error('[LRCLIB] Redis write error:', e);
+      }
+    } else {
+      // Complete failure
+      if (audioFile && audioFile.size > 0) {
+         return NextResponse.json({ error: 'Failed to transcribe or find lyrics' }, { status: 404 });
       }
     }
 

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import TitleBar from "@/components/TitleBar";
 import StatusBar from "@/components/StatusBar";
 import LeftPanel from "@/components/LeftPanel";
@@ -17,6 +17,7 @@ const DEFAULT_CONFIG: AnalysisConfig = {
   keyAlgo: "ks",
   minFreq: 65,
   maxFreq: 8000,
+  autoFreq: true,
 };
 
 export default function HomePage() {
@@ -24,7 +25,7 @@ export default function HomePage() {
   const [audioFile,     setAudioFile]     = useState<AudioFileInfo | null>(null);
   const [analysisResult,setAnalysisResult]= useState<AnalysisResult | null>(null);
   const [progress,      setProgress]      = useState(0);
-  const [config]                          = useState<AnalysisConfig>(DEFAULT_CONFIG);
+  const [config,        setConfig]        = useState<AnalysisConfig>(DEFAULT_CONFIG);
 
   // Real audio player
   const player = useAudioPlayer(audioFile?.file ?? null);
@@ -69,6 +70,22 @@ export default function HomePage() {
     }
   }, [audioFile, config]);
 
+  // ── Spacebar play/pause shortcut ──
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Only trigger if not focused on an input/select/textarea
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+
+      if (e.code === "Space") {
+        e.preventDefault(); // prevent page scroll
+        if (audioFile) player.togglePlay();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [audioFile, player]);
+
   return (
     <div className="app-shell">
       <TitleBar state={analysisState} />
@@ -76,21 +93,21 @@ export default function HomePage() {
         <LeftPanel
           audioFile={audioFile}
           analysisState={analysisState}
-          isPlaying={player.isPlaying}
-          currentTime={player.currentTime}
-          duration={player.duration || audioFile?.duration || 0}
           progress={progress}
+          config={config}
+          onConfigChange={setConfig}
           onFileUpload={handleFileUpload}
           onAnalyze={handleAnalyze}
-          onPlayPause={player.togglePlay}
-          onStop={player.stop}
         />
         <CenterPanel
           analysisState={analysisState}
           analysisResult={analysisResult}
           currentTime={player.currentTime}
           duration={player.duration || audioFile?.duration || 0}
+          isPlaying={player.isPlaying}
           onSeek={player.seekTo}
+          onPlayPause={player.togglePlay}
+          onStop={player.stop}
         />
         <RightPanel
           analysisState={analysisState}

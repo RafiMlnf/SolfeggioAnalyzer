@@ -8,7 +8,10 @@ interface CenterPanelProps {
   analysisResult: AnalysisResult | null;
   currentTime: number;
   duration: number;
+  isPlaying: boolean;
   onSeek?: (time: number) => void;
+  onPlayPause: () => void;
+  onStop: () => void;
 }
 
 // ── Y-axis labels ───────────────────────────────────────────────
@@ -29,6 +32,7 @@ const SPEC_FREQ_LABELS: { label: string; normPos: number }[] = [
   { label: "100", normPos: 0.82 },
   { label: "50", normPos: 0.95 },
 ];
+
 
 // ── Heat color scale ────────────────────────────────────────────
 const HEAT = ["#0d0d1a", "#131340", "#1a1a6e", "#1f3a9e", "#2060a0", "#1e8080", "#28a850", "#7ab820", "#c8b010", "#e88010", "#e84030", "#ef4444", "#ff8888"];
@@ -78,6 +82,19 @@ function mockSpectrogram(phase: number): number[][] {
     })
   );
 }
+
+function mockWaveform(phase: number): [number, number][] {
+  return Array.from({ length: 300 }, (_, t) => {
+    // Smooth envelope moving over time
+    const env = Math.sin(phase * 0.05 + t * 0.02) * 0.5 + 0.5;
+    // Base amplitude with some noise
+    const amp = 0.1 + (env * 0.4) + (Math.sin(t * 0.5) * 0.1);
+    const noise = Math.random() * 0.05;
+    const val = Math.max(0.02, Math.min(1, amp + noise));
+    return [-val, val];
+  });
+}
+
 
 // ── Canvas renderer ─────────────────────────────────────────────
 function drawCanvas(
@@ -176,14 +193,159 @@ function drawCanvas(
   }
 }
 
+// ── Waveform renderer (redesigned) ──────────────────────────────
+function drawWaveform(
+  canvas: HTMLCanvasElement,
+  waveform: [number, number][],
+  startSlice: number,
+  endSlice: number,
+  currentTime: number,
+  duration: number
+) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const W = canvas.width;
+  const H = canvas.height;
+  const mid = H / 2;
+
+  // ── Background ──
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0,   "#0a0a18");
+  bgGrad.addColorStop(0.5, "#0d0d1f");
+  bgGrad.addColorStop(1,   "#0a0a18");
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
+
+  const visible = waveform.slice(startSlice, endSlice);
+  const T = visible.length;
+  if (T === 0) return;
+  const barW = W / T;
+
+  // ── Subtle horizontal grid lines ──
+  ctx.lineWidth = 0.5;
+  [0.25, 0.5, 0.75].forEach(frac => {
+    const y = frac * H;
+    ctx.strokeStyle = "rgba(99,102,241,0.06)";
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  });
+
+  // ── Playback progress fill (listened region) ──
+  if (duration > 0 && currentTime > 0) {
+    const total = waveform.length;
+    const curSlice = Math.floor((currentTime / duration) * total);
+    const progressW = ((Math.min(curSlice, endSlice) - startSlice) / T) * W;
+    if (progressW > 0) {
+      ctx.fillStyle = "rgba(99,102,241,0.05)";
+      ctx.fillRect(0, 0, Math.max(0, progressW), H);
+    }
+  }
+
+  // ── Waveform bars (main + mirror) ──
+  for (let t = 0; t < T; t++) {
+    const [mn, mx] = visible[t];
+    const x = t * barW;
+    const bw = Math.max(1, barW - 0.8);
+
+    // Amplitude drives color (indigo → violet → rose at peaks)
+    const amp = Math.max(Math.abs(mn), Math.abs(mx));
+    const h = 250 - amp * 160;      // hue: 250=indigo → 90=yellow (never used), capped at rose
+    const s = 60 + amp * 35;
+    const l = 45 + amp * 20;
+
+    // Top half (above center) — main fill
+    const y1top = mid - mx * mid * 0.9;
+    const y2top = mid;
+    const topGrad = ctx.createLinearGradient(0, y1top, 0, y2top);
+    topGrad.addColorStop(0, `hsla(${h},${s}%,${l}%,0.95)`);
+    topGrad.addColorStop(1, `hsla(${h},${s}%,${l}%,0.15)`);
+    ctx.fillStyle = topGrad;
+    ctx.fillRect(x, y1top, bw, y2top - y1top);
+
+    // Bottom half (below center) — mirrored reflection, slightly dimmer
+    const y1bot = mid;
+    const y2bot = mid - mn * mid * 0.9;
+    const botGrad = ctx.createLinearGradient(0, y1bot, 0, y2bot);
+    botGrad.addColorStop(0, `hsla(${h},${s}%,${l}%,0.12)`);
+    botGrad.addColorStop(1, `hsla(${h},${s}%,${l}%,0.7)`);
+    ctx.fillStyle = botGrad;
+    ctx.fillRect(x, y1bot, bw, y2bot - y1bot);
+
+    // Glow cap on peaks (top edge only, high amplitude)
+    if (amp > 0.5) {
+      ctx.fillStyle = `hsla(${h},${s}%,${Math.min(90, l + 30)}%,${amp * 0.4})`;
+      ctx.fillRect(x, y1top, bw, 1.5);
+    }
+  }
+
+  // ── Center line (axis) ──
+  const axisGrad = ctx.createLinearGradient(0, 0, W, 0);
+  axisGrad.addColorStop(0,   "rgba(99,102,241,0)");
+  axisGrad.addColorStop(0.2, "rgba(99,102,241,0.4)");
+  axisGrad.addColorStop(0.8, "rgba(99,102,241,0.4)");
+  axisGrad.addColorStop(1,   "rgba(99,102,241,0)");
+  ctx.strokeStyle = axisGrad;
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, mid); ctx.lineTo(W, mid); ctx.stroke();
+
+  // ── Playhead ──
+  if (duration > 0 && currentTime > 0) {
+    const total = waveform.length;
+    const curSlice = Math.floor((currentTime / duration) * total);
+    if (curSlice >= startSlice && curSlice <= endSlice) {
+      const px = ((curSlice - startSlice) / T) * W;
+
+      // Soft glow behind playhead
+      const glowGrad = ctx.createLinearGradient(px - 12, 0, px + 12, 0);
+      glowGrad.addColorStop(0, "rgba(239,68,68,0)");
+      glowGrad.addColorStop(0.5, "rgba(239,68,68,0.18)");
+      glowGrad.addColorStop(1, "rgba(239,68,68,0)");
+      ctx.fillStyle = glowGrad;
+      ctx.fillRect(px - 12, 0, 24, H);
+
+      // Line
+      ctx.strokeStyle = "rgba(239,68,68,0.9)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke();
+
+      // Triangle marker
+      ctx.fillStyle = "#ef4444";
+      ctx.beginPath();
+      ctx.moveTo(px - 5, 0);
+      ctx.lineTo(px + 5, 0);
+      ctx.lineTo(px, 8);
+      ctx.closePath();
+      ctx.fill();
+
+      // Time label
+      const m = Math.floor(currentTime / 60);
+      const s = Math.floor(currentTime % 60);
+      const ms = Math.floor((currentTime % 1) * 100);
+      const label = `${m}:${String(s).padStart(2,"0")}.${String(ms).padStart(2,"0")}`;
+      const lx = Math.min(W - 52, Math.max(2, px + 6));
+      ctx.fillStyle = "rgba(13,13,26,0.75)";
+      ctx.beginPath();
+      ctx.roundRect(lx, 10, 48, 14, 4);
+      ctx.fill();
+      ctx.fillStyle = "#ef4444";
+      ctx.font = "bold 8px 'JetBrains Mono', monospace";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, lx + 4, 17);
+    }
+  }
+}
+
+
 // ── Main Component ──────────────────────────────────────────────
-export default function CenterPanel({ analysisState, analysisResult, currentTime, duration, onSeek }: CenterPanelProps) {
+export default function CenterPanel({ analysisState, analysisResult, currentTime, duration, isPlaying, onSeek, onPlayPause, onStop }: CenterPanelProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const isDragging = useRef(false);
   const lastDragX = useRef(0);
 
-  const [viewMode, setViewMode] = useState<"heatmap" | "spectrogram">("heatmap");
+  type ViewMode = "heatmap" | "spectrogram" | "waveform";
+  const [viewMode, setViewMode] = useState<ViewMode>("heatmap");
   const [lyricsOpen, setLyricsOpen] = useState(false);
   const [zoomX, setZoomX] = useState(1);
   const [panX, setPanX] = useState(0); // 0..1
@@ -203,7 +365,12 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
     return () => cancelAnimationFrame(frameId);
   }, [isReady]);
 
+  // activeData is used for heatmap/spectrogram (2D grid views)
   const activeData = useMemo(() => {
+    if (viewMode === "waveform") {
+      if (isReady) return analysisResult!.waveformData;
+      return mockWaveform(animTime);
+    }
     if (isReady) {
       return viewMode === "heatmap" ? analysisResult!.heatmapData : analysisResult!.spectrogramData;
     }
@@ -219,14 +386,19 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
 
   // Render canvas
   const render = useCallback(() => {
-    if (!canvasRef.current || !wrapperRef.current || !activeData?.length) return;
+    if (!canvasRef.current || !wrapperRef.current) return;
     const wrapper = wrapperRef.current;
     const canvas = canvasRef.current;
     canvas.width = wrapper.clientWidth;
     canvas.height = wrapper.clientHeight;
 
-    drawCanvas(canvas, activeData, startSlice, endSlice, viewMode, currentTime, duration);
-  }, [activeData, startSlice, endSlice, viewMode, currentTime, duration]);
+    if (viewMode === "waveform") {
+      const data = isReady ? analysisResult?.waveformData : activeData as [number, number][];
+      if (data) drawWaveform(canvas, data, startSlice, endSlice, currentTime, duration);
+    } else if (activeData?.length) {
+      drawCanvas(canvas, activeData as number[][], startSlice, endSlice, viewMode as "heatmap" | "spectrogram", currentTime, duration);
+    }
+  }, [activeData, startSlice, endSlice, viewMode, currentTime, duration, isReady, analysisResult]);
 
   useEffect(() => { render(); }, [render]);
 
@@ -280,6 +452,8 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
   const onMouseUp = () => { isDragging.current = false; };
 
   const yLabels = viewMode === "heatmap" ? SOLFEGE_LABELS : null;
+  const showYAxis = viewMode === "heatmap" || viewMode === "spectrogram";
+  const showXAxis = true;
 
   // ── Lyrics matching: find active index based on currentTime ──
   const lyrics = isReady ? (analysisResult?.lyrics ?? []) : [];
@@ -296,17 +470,39 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
     return idx;
   }, [lyrics, currentTime, hasLyrics]);
 
+  const formatTime = (seconds: number) => {
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    const ms = Math.floor((seconds % 1) * 100);
+    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
+  };
+
   return (
     <div className="panel-center">
       {/* Toolbar */}
       <div className="heatmap-toolbar">
         <div className="heatmap-toolbar__group">
+          {/* Transport controls */}
+          <button className="transport__btn" onClick={onStop} title="Stop">◼</button>
+          <button
+            className={`transport__btn ${isPlaying ? "transport__btn--active" : ""}`}
+            onClick={onPlayPause}
+            title={isPlaying ? "Pause (Space)" : "Play (Space)"}
+          >
+            {isPlaying ? "⏸" : "▶"}
+          </button>
+          <span className="transport__time">{formatTime(currentTime)}</span>
+          <span className="transport__time-label">/ {duration > 0 ? formatTime(duration) : "--:--.--"}</span>
+          <div className="toolbar-separator" />
           <span className="toolbar-label">View:</span>
           <button className={`toolbar-btn ${viewMode === "heatmap" ? "toolbar-btn--active" : ""}`} onClick={() => setViewMode("heatmap")}>
-            Notation Heatmap
+            Heatmap
           </button>
           <button className={`toolbar-btn ${viewMode === "spectrogram" ? "toolbar-btn--active" : ""}`} onClick={() => setViewMode("spectrogram")}>
             Spectrogram
+          </button>
+          <button className={`toolbar-btn ${viewMode === "waveform" ? "toolbar-btn--active" : ""}`} onClick={() => setViewMode("waveform")}>
+            Waveform
           </button>
           <div className="toolbar-separator" />
           <span className="toolbar-label">Zoom:</span>
@@ -320,7 +516,7 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
         <div className="heatmap-toolbar__group">
           {isReady && (
             <span className="toolbar-label" style={{ color: "var(--accent-primary)" }}>
-              {viewMode === "heatmap" ? "Y: Solfeggio Notation" : "Y: Frequency (Hz log)"}
+              {viewMode === "heatmap" ? "Y: Solfeggio Notation" : viewMode === "spectrogram" ? "Y: Frequency (Hz log)" : "Y: Amplitude"}
               &nbsp;|&nbsp;Slices {startSlice}–{endSlice}/{totalSlices}
             </span>
           )}
@@ -343,12 +539,13 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
 
       {/* Heatmap area */}
       {isReady || true ? ( // always show (show mock when idle)
-        <div className="heatmap-container">
+        <div className="heatmap-container" style={!showYAxis ? { gridTemplateColumns: "1fr" } : undefined}>
           {/* Y-axis */}
+          {showYAxis && (
           <div className="heatmap-y-axis">
             {viewMode === "heatmap" && yLabels
               ? yLabels.map((label, i) => (
-                <div key={i} className={`heatmap-y-label ${label.startsWith("1 ") || label.startsWith("1̣") ? "heatmap-y-label--root" : ""}`}>
+                <div key={i} className={`heatmap-y-label ${label.startsWith("1 ") || label.startsWith("ṣ") ? "heatmap-y-label--root" : ""}`}>
                   {label}
                 </div>
               ))
@@ -359,6 +556,7 @@ export default function CenterPanel({ analysisState, analysisResult, currentTime
               ))
             }
           </div>
+          )}
 
           {/* Canvas */}
           <div

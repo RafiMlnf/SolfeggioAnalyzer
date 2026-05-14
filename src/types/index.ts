@@ -7,6 +7,7 @@ export interface AnalysisConfig {
   keyAlgo: "ks" | "temperley";
   minFreq: number;
   maxFreq: number;
+  autoFreq?: boolean;
 }
 
 export interface AudioFileInfo {
@@ -49,6 +50,7 @@ export interface MoodInfo {
   distribution: MoodDistribution[];
   valence: number;
   arousal: number;
+  style?: string;
 }
 
 export interface AnalysisResult {
@@ -58,6 +60,7 @@ export interface AnalysisResult {
   totalNotes: number;
   dominantNotes: NoteDistribution[];
   mood: MoodInfo;
+  lyricMood?: string;
   chromagram: ChromagramEntry[];
   explanation: string;
   intervals: number[];
@@ -68,4 +71,5 @@ export interface AnalysisResult {
   processingTime: number;       // ms
   duration: number;             // seconds
   tensionPeaks: number[];       // timestamps in seconds of high-intensity moments
+  waveformData: [number, number][]; // [timeSlice] = [min, max] amplitude per slice
 }

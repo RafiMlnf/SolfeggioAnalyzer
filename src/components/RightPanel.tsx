@@ -109,6 +109,31 @@ export default function RightPanel({ analysisState, analysisResult }: RightPanel
             </div>
           </div>
 
+          {/* Lyric Mood */}
+          {r.lyricMood && (
+            <div className="panel-section">
+              <div className="panel-section__header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span className="panel-section__title">◈ Klasifikasi Mood (Lirik)</span>
+                <span style={{
+                  fontSize: "6px",
+                  fontFamily: "var(--font-mono)",
+                  color: "var(--accent-primary)",
+                  background: "rgba(139,92,246,0.12)",
+                  border: "1px solid rgba(139,92,246,0.3)",
+                  borderRadius: "4px",
+                  padding: "1px 4px",
+                  letterSpacing: "0.05em",
+                }}>✦ Semantic AI</span>
+              </div>
+              <div className="panel-section__body">
+                <div className="mood-badge mood-badge--primary" style={{ background: "rgba(139, 92, 246, 0.15)", color: "#c4b5fd", border: "1px solid rgba(139, 92, 246, 0.3)" }}>
+                  <span>{r.lyricMood === "Happy" ? "😊" : r.lyricMood === "Sad" ? "😢" : r.lyricMood === "Romantic" ? "💖" : r.lyricMood === "Angry" ? "😡" : "🤔"}</span>
+                  <span>{r.lyricMood}</span>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Mood Distribution */}
           <div className="panel-section">
             <div className="panel-section__header">

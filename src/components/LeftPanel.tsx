@@ -1,34 +1,33 @@
 "use client";
 
 import { useRef, useCallback } from "react";
-import { AnalysisState, AudioFileInfo } from "@/types";
+import { AnalysisState, AudioFileInfo, AnalysisConfig } from "@/types";
 
 interface LeftPanelProps {
   audioFile: AudioFileInfo | null;
   analysisState: AnalysisState;
-  isPlaying: boolean;
-  currentTime: number;
-  duration: number;
   progress: number;
+  config: AnalysisConfig;
+  onConfigChange: (config: AnalysisConfig) => void;
   onFileUpload: (file: File) => void;
   onAnalyze: () => void;
-  onPlayPause: () => void;
-  onStop: () => void;
 }
 
 export default function LeftPanel({
   audioFile,
   analysisState,
-  isPlaying,
-  currentTime,
-  duration,
   progress,
+  config,
+  onConfigChange,
   onFileUpload,
   onAnalyze,
-  onPlayPause,
-  onStop,
 }: LeftPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const formatSize = (bytes: number) => {
+    const mb = bytes / (1024 * 1024);
+    return mb >= 1 ? `${mb.toFixed(2)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
+  };
 
   const formatTime = (seconds: number) => {
     const m = Math.floor(seconds / 60);
@@ -37,11 +36,6 @@ export default function LeftPanel({
     return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms
       .toString()
       .padStart(2, "0")}`;
-  };
-
-  const formatSize = (bytes: number) => {
-    const mb = bytes / (1024 * 1024);
-    return mb >= 1 ? `${mb.toFixed(2)} MB` : `${(bytes / 1024).toFixed(0)} KB`;
   };
 
   const handleDrop = useCallback(
@@ -149,38 +143,6 @@ export default function LeftPanel({
         </div>
       )}
 
-      {/* TRANSPORT */}
-      {audioFile && (
-        <div className="panel-section">
-          <div className="panel-section__header">
-            <span className="panel-section__title">◈ Transport</span>
-            <span className="panel-section__toggle">▾</span>
-          </div>
-          <div className="panel-section__body">
-            <div className="transport">
-              <button
-                className="transport__btn"
-                onClick={onStop}
-                title="Stop"
-              >
-                ◼
-              </button>
-              <button
-                className={`transport__btn ${isPlaying ? "transport__btn--active" : ""}`}
-                onClick={onPlayPause}
-                title={isPlaying ? "Pause" : "Play"}
-              >
-                {isPlaying ? "⏸" : "▶"}
-              </button>
-              <span className="transport__time">{formatTime(currentTime)}</span>
-              <span className="transport__time-label">
-                / {duration > 0 ? formatTime(duration) : "--:--.--"}
-              </span>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* ANALYSIS PARAMS */}
       <div className="panel-section">
         <div className="panel-section__header">
@@ -191,48 +153,71 @@ export default function LeftPanel({
           <div className="param-group">
             <div className="param-row">
               <span className="param-row__label">FFT Size</span>
-              <select className="param-select" defaultValue="8192">
-                <option value="2048">2048</option>
+              <select
+                className="param-select"
+                value={config.fftSize}
+                onChange={(e) => onConfigChange({ ...config, fftSize: Number(e.target.value) as any })}
+              >
+                <option value="2048">2048 (Fast)</option>
                 <option value="4096">4096</option>
-                <option value="8192">8192</option>
-                <option value="16384">16384</option>
-              </select>
-            </div>
-            <div className="param-row">
-              <span className="param-row__label">Hop Size</span>
-              <span className="param-row__value">512</span>
-            </div>
-            <div className="param-row">
-              <span className="param-row__label">Window</span>
-              <select className="param-select" defaultValue="hann">
-                <option value="hann">Hann</option>
-                <option value="hamming">Hamming</option>
-                <option value="blackman">Blackman</option>
+                <option value="8192">8192 (Balanced)</option>
+                <option value="16384">16384 (Detailed)</option>
               </select>
             </div>
             <div className="param-row">
               <span className="param-row__label">Pitch Algo</span>
-              <select className="param-select" defaultValue="yin">
+              <select
+                className="param-select"
+                value={config.pitchAlgo}
+                onChange={(e) => onConfigChange({ ...config, pitchAlgo: e.target.value as any })}
+              >
                 <option value="yin">YIN</option>
                 <option value="amdf">AMDF</option>
                 <option value="macleod">McLeod</option>
               </select>
             </div>
-            <div className="param-row">
-              <span className="param-row__label">Key Algo</span>
-              <select className="param-select" defaultValue="ks">
-                <option value="ks">Krumhansl-S</option>
-                <option value="temperley">Temperley</option>
-              </select>
+            <div className="param-row" style={{ marginTop: 8 }}>
+              <span className="param-row__label" style={{ color: "var(--accent-primary)" }}>Auto Freq Range</span>
+              <input
+                type="checkbox"
+                checked={config.autoFreq}
+                onChange={(e) => onConfigChange({ ...config, autoFreq: e.target.checked })}
+                style={{ cursor: "pointer" }}
+              />
             </div>
-            <div className="param-row">
-              <span className="param-row__label">Min Freq</span>
-              <span className="param-row__value">65 Hz</span>
-            </div>
-            <div className="param-row">
-              <span className="param-row__label">Max Freq</span>
-              <span className="param-row__value">2093 Hz</span>
-            </div>
+            {!config.autoFreq && (
+              <>
+                <div className="param-row">
+                  <span className="param-row__label">Min Freq</span>
+                  <select
+                    className="param-select"
+                    value={config.minFreq}
+                    onChange={(e) => onConfigChange({ ...config, minFreq: Number(e.target.value) })}
+                  >
+                    <option value="20">20 Hz</option>
+                    <option value="65">65 Hz</option>
+                    <option value="100">100 Hz</option>
+                  </select>
+                </div>
+                <div className="param-row">
+                  <span className="param-row__label">Max Freq</span>
+                  <select
+                    className="param-select"
+                    value={config.maxFreq}
+                    onChange={(e) => onConfigChange({ ...config, maxFreq: Number(e.target.value) })}
+                  >
+                    <option value="4000">4 kHz</option>
+                    <option value="8000">8 kHz</option>
+                    <option value="12000">12 kHz</option>
+                  </select>
+                </div>
+              </>
+            )}
+            {config.autoFreq && (
+              <div style={{ fontSize: "8px", color: "var(--text-dim)", marginTop: "4px", lineHeight: 1.4 }}>
+                AI will automatically detect the optimal frequency range to analyze based on the audio brightness.
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -261,7 +246,7 @@ export default function LeftPanel({
         ) : (
           <button
             className="btn-analyze"
-            disabled={!audioFile || analysisState === "processing"}
+            disabled={!audioFile}
             onClick={onAnalyze}
           >
             {analysisState === "complete" ? "↻ Re-Analyze" : "▶ Analyze"}

@@ -1,13 +1,7 @@
-/**
- * fft.ts — Cooley-Tukey radix-2 FFT
- * In-place transform on real[] and imag[] arrays (length must be power of 2)
- */
-
 export function fft(real: number[], imag: number[]): void {
   const n = real.length;
   if (n <= 1) return;
 
-  // Bit-reversal permutation
   let j = 0;
   for (let i = 1; i < n; i++) {
     let bit = n >> 1;
@@ -19,7 +13,6 @@ export function fft(real: number[], imag: number[]): void {
     }
   }
 
-  // Butterfly operations
   for (let len = 2; len <= n; len <<= 1) {
     const angle = (-2 * Math.PI) / len;
     const wReal = Math.cos(angle);
@@ -31,8 +24,8 @@ export function fft(real: number[], imag: number[]): void {
         const uI = imag[i + k];
         const vR = real[i + k + len / 2] * cr - imag[i + k + len / 2] * ci;
         const vI = real[i + k + len / 2] * ci + imag[i + k + len / 2] * cr;
-        real[i + k]           = uR + vR;
-        imag[i + k]           = uI + vI;
+        real[i + k] = uR + vR;
+        imag[i + k] = uI + vI;
         real[i + k + len / 2] = uR - vR;
         imag[i + k + len / 2] = uI - vI;
         const newCr = cr * wReal - ci * wImag;
@@ -43,7 +36,6 @@ export function fft(real: number[], imag: number[]): void {
   }
 }
 
-/** Apply Hann window to a sample array */
 export function applyHannWindow(samples: Float32Array): Float32Array {
   const n = samples.length;
   const out = new Float32Array(n);
@@ -54,7 +46,6 @@ export function applyHannWindow(samples: Float32Array): Float32Array {
   return out;
 }
 
-/** Apply Hamming window */
 export function applyHammingWindow(samples: Float32Array): Float32Array {
   const n = samples.length;
   const out = new Float32Array(n);
@@ -65,7 +56,6 @@ export function applyHammingWindow(samples: Float32Array): Float32Array {
   return out;
 }
 
-/** Apply Blackman window */
 export function applyBlackmanWindow(samples: Float32Array): Float32Array {
   const n = samples.length;
   const out = new Float32Array(n);
@@ -79,7 +69,6 @@ export function applyBlackmanWindow(samples: Float32Array): Float32Array {
   return out;
 }
 
-/** Compute magnitude spectrum from real+imag FFT output */
 export function magnitudeSpectrum(real: number[], imag: number[]): Float32Array {
   const half = real.length / 2;
   const mag = new Float32Array(half);
@@ -89,7 +78,6 @@ export function magnitudeSpectrum(real: number[], imag: number[]): Float32Array 
   return mag;
 }
 
-/** Convert linear magnitude to dB */
 export function toDecibels(mag: Float32Array, minDb = -80): Float32Array {
   const db = new Float32Array(mag.length);
   for (let i = 0; i < mag.length; i++) {

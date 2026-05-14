@@ -12,6 +12,7 @@ import { fft, applyHannWindow, applyHammingWindow, applyBlackmanWindow, magnitud
 import { detectKey, midiToSolfeggioRow, NOTE_NAMES } from "./keyDetection";
 import { findTopPitches, smoothHeatmap, freqToMidi } from "./pitchDetection";
 import { AnalysisConfig, AnalysisResult, NoteDistribution, MoodDistribution } from "@/types";
+import { detectChordFromChroma, analyzeChordProgression, type ChordProgressionFeatures } from "./chordDetection";
 
 // ── Constants ──────────────────────────────────────────────────
 const TARGET_SLICES = 300;  // Heatmap time resolution
@@ -74,7 +75,25 @@ function computeLogBands(
   return bands;
 }
 
-// ── Chromagram update ──────────────────────────────────────────
+// ── A-weighting: perceptual loudness curve (IEC 61672:2003) ───
+// Returns a multiplier 0-1 that models how the human ear perceives
+// different frequencies. Low bass and very high treble are attenuated.
+function aWeight(f: number): number {
+  if (f < 20) return 0;
+  const f2 = f * f;
+  const num = 12194 * 12194 * f2 * f2;
+  const den =
+    (f2 + 20.6 * 20.6) *
+    Math.sqrt((f2 + 107.7 * 107.7) * (f2 + 737.9 * 737.9)) *
+    (f2 + 12194 * 12194);
+  const ra = num / den;
+  // Normalize so 1kHz ≈ 1.0
+  const ref = 12194 * 12194 * 1e12 /
+    ((1e6 + 20.6 * 20.6) * Math.sqrt((1e6 + 107.7 * 107.7) * (1e6 + 737.9 * 737.9)) * (1e6 + 12194 * 12194));
+  return ra / ref;
+}
+
+// ── Chromagram update (perceptual A-weighted) ─────────────────
 function updateChromagram(
   mag: Float32Array,
   sampleRate: number,
@@ -86,7 +105,8 @@ function updateChromagram(
     if (freq < 65 || freq > 2093) continue;
     const midi = 69 + 12 * Math.log2(freq / 440);
     const noteClass = ((Math.round(midi) % 12) + 12) % 12;
-    chroma[noteClass] += mag[i];
+    // Apply A-weighting so treble-heavy instruments don't dominate
+    chroma[noteClass] += mag[i] * aWeight(freq);
   }
 }
 
@@ -185,59 +205,67 @@ function detectAudioProfile(samples: Float32Array, sampleRate: number): AudioPro
   return { minFreq, maxFreq, brightness };
 }
 
-// ── BPM detection (autocorrelation + spectral flux) ─────────────
-// brightness hint: 0=dark/slow, 1=bright/fast — shifts preferred BPM range
+// ── BPM detection (autocorrelation + percussive onset) ───────────
+// Uses dedicated kick (20-300Hz) + snare (200-1kHz) bands for accurate onset,
+// plus iterative octave correction and multi-candidate harmonic voting.
 function detectBPM(samples: Float32Array, sampleRate: number, brightness = 0.5): number {
 
-  const frameSize = 1024;
+  const frameSize = 2048; // larger = better low-freq resolution for kick
   const hopSize = 512;
-  // Analyze up to 30 seconds for performance (enough to find tempo)
-  const analysisLen = Math.min(samples.length, sampleRate * 30);
+  // Analyze up to 60 seconds for better tempo stability
+  const analysisLen = Math.min(samples.length, sampleRate * 60);
   const numFrames = Math.floor((analysisLen - frameSize) / hopSize);
 
-  if (numFrames < 20) return 120; // too short to detect
+  if (numFrames < 20) return 120;
 
-  // ── 1. Compute spectral flux onset strength (percussive band 0–4kHz) ──
-  const maxBin = Math.min(Math.floor(4000 * frameSize / sampleRate), frameSize / 2);
+  // ── 1. Dual-band percussive onset (kick + snare) ──
+  const kickBinMax = Math.floor(300 * frameSize / sampleRate);
+  const snareBinMax = Math.floor(1000 * frameSize / sampleRate);
+  const snareBinMin = Math.floor(200 * frameSize / sampleRate);
   let prevMag: Float32Array | null = null;
-  const onset: number[] = [];
+  const onsetKick: number[] = [];
+  const onsetSnare: number[] = [];
 
   for (let i = 0; i < numFrames; i++) {
-    // Windowed frame
     const frame = new Float32Array(frameSize);
     const offset = i * hopSize;
     for (let j = 0; j < frameSize; j++) {
-      const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * j) / (frameSize - 1)); // Hann
-      frame[j] = samples[offset + j] * w;
+      const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * j) / (frameSize - 1));
+      frame[j] = (samples[offset + j] ?? 0) * w;
     }
-
     const real = Array.from(frame);
     const imag = new Array(frameSize).fill(0);
     fft(real, imag);
     const mag = magnitudeSpectrum(real, imag);
 
     if (prevMag) {
-      // Half-wave rectified spectral flux (only positive differences = new energy)
-      let flux = 0;
-      for (let j = 0; j < maxBin; j++) {
+      let kick = 0, snare = 0;
+      for (let j = 1; j < mag.length; j++) {
         const diff = mag[j] - prevMag[j];
-        if (diff > 0) flux += diff;
+        if (diff <= 0) continue;
+        if (j <= kickBinMax) kick += diff;
+        if (j >= snareBinMin && j <= snareBinMax) snare += diff;
       }
-      onset.push(flux);
+      onsetKick.push(kick);
+      onsetSnare.push(snare);
     } else {
-      onset.push(0);
+      onsetKick.push(0);
+      onsetSnare.push(0);
     }
     prevMag = mag;
   }
 
-  // ── 2. Normalize onset signal ──
-  const maxO = Math.max(...onset, 1e-10);
-  for (let i = 0; i < onset.length; i++) onset[i] /= maxO;
+  // ── 2. Combine kick (65%) + snare (35%) onset ──
+  const maxKick = Math.max(...onsetKick, 1e-10);
+  const maxSnare = Math.max(...onsetSnare, 1e-10);
+  const onset = onsetKick.map((k, i) =>
+    (k / maxKick) * 0.65 + (onsetSnare[i] / maxSnare) * 0.35
+  );
 
-  // ── 3. Autocorrelation in BPM range 50–200 ──
-  const fps = sampleRate / hopSize; // frames per second
-  const minLag = Math.floor((fps * 60) / 200);
-  const maxLag = Math.min(Math.ceil((fps * 60) / 50), Math.floor(onset.length / 2));
+  // ── 3. Autocorrelation in BPM range 40–220 ──
+  const fps = sampleRate / hopSize;
+  const minLag = Math.floor((fps * 60) / 220);
+  const maxLag = Math.min(Math.ceil((fps * 60) / 40), Math.floor(onset.length / 2));
 
   const acf: { bpm: number; r: number }[] = [];
   for (let lag = minLag; lag <= maxLag; lag++) {
@@ -247,7 +275,7 @@ function detectBPM(samples: Float32Array, sampleRate: number, brightness = 0.5):
     acf.push({ bpm: (fps * 60) / lag, r: sum / n });
   }
 
-  // ── 4. Find local maxima (peaks) in the autocorrelation ──
+  // ── 4. Find local maxima in the autocorrelation ──
   const peaks: typeof acf = [];
   for (let i = 1; i < acf.length - 1; i++) {
     if (acf[i].r > acf[i - 1].r && acf[i].r > acf[i + 1].r) {
@@ -257,45 +285,47 @@ function detectBPM(samples: Float32Array, sampleRate: number, brightness = 0.5):
   if (peaks.length === 0) return 120;
   peaks.sort((a, b) => b.r - a.r);
 
-  // ── 5. Adaptive octave correction based on spectral brightness ──
-  // Dark/calm songs (bass-heavy):  prefer  55-120 BPM
-  // Neutral songs:                 prefer  65-145 BPM
-  // Bright/energetic songs:        prefer  80-175 BPM
-  let prefLo: number, prefHi: number;
-  if (brightness > 0.55) {        // bright = fast/energetic (EDM, metal, fast pop)
-    prefLo = 80; prefHi = 175;
-  } else if (brightness < 0.35) { // dark = slow/calm (ballad, ambient, slow jazz)
-    prefLo = 55; prefHi = 120;
-  } else {                        // neutral
-    prefLo = 65; prefHi = 150;
+  // ── 5. Multi-candidate harmonic voting ──
+  // BPM with the most harmonic support (half/double also appears) wins.
+  const topN = peaks.slice(0, Math.min(8, peaks.length));
+  const findNear = (target: number, tol = 5) =>
+    peaks.find(p => Math.abs(p.bpm - target) < tol);
+
+  const votes = topN.map(p => {
+    let score = p.r;
+    const half = findNear(p.bpm / 2);
+    const dbl = findNear(p.bpm * 2);
+    const third = findNear(p.bpm / 3);
+    const triple = findNear(p.bpm * 3);
+    if (half) score += half.r * 0.40;
+    if (dbl) score += dbl.r * 0.40;
+    if (third) score += third.r * 0.20;
+    if (triple) score += triple.r * 0.20;
+    return { bpm: p.bpm, score };
+  });
+  votes.sort((a, b) => b.score - a.score);
+  let bestBpm = votes[0]?.bpm ?? peaks[0].bpm;
+
+  // ── 6. Iterative octave correction toward natural tempo range 60-140 ──
+  const TARGET_LO = 60, TARGET_HI = 140;
+  for (let iter = 0; iter < 3; iter++) {
+    if (bestBpm > TARGET_HI) {
+      const halved = bestBpm / 2;
+      const halfPeak = findNear(halved, 8);
+      if ((halfPeak && halfPeak.r > peaks[0].r * 0.25) || halved >= TARGET_LO) {
+        bestBpm = halved;
+      } else break;
+    } else if (bestBpm < TARGET_LO) {
+      const doubled = bestBpm * 2;
+      const dblPeak = findNear(doubled, 8);
+      if ((dblPeak && dblPeak.r > peaks[0].r * 0.25) || doubled <= TARGET_HI) {
+        bestBpm = doubled;
+      } else break;
+    } else break;
   }
 
-  let best = peaks[0];
-  const inPreferred = (bpm: number) => bpm >= prefLo && bpm <= prefHi;
-  const findNear = (target: number) => peaks.find(p => Math.abs(p.bpm - target) < 8);
-
-  if (!inPreferred(best.bpm)) {
-    if (best.bpm > prefHi) {
-      // Too fast — try halving, but only if the halved value enters preferred range
-      const half = findNear(best.bpm / 2);
-      if (half && half.r > best.r * 0.35) {
-        best = half;
-      } else if (inPreferred(best.bpm / 2)) {
-        best = { bpm: best.bpm / 2, r: best.r };
-      }
-    } else if (best.bpm < prefLo) {
-      // Too slow — try doubling
-      const dbl = findNear(best.bpm * 2);
-      if (dbl && dbl.r > best.r * 0.35) {
-        best = dbl;
-      } else if (inPreferred(best.bpm * 2)) {
-        best = { bpm: best.bpm * 2, r: best.r };
-      }
-    }
-  }
-
-  console.log(`[BPM] brightness=${brightness.toFixed(2)} → prefRange=${prefLo}-${prefHi} → ${Math.round(best.bpm)} BPM`);
-  return Math.round(Math.max(40, Math.min(220, best.bpm)));
+  console.log(`[BPM] brightness=${brightness.toFixed(2)} → ${Math.round(bestBpm)} BPM (top3: ${topN.slice(0, 3).map(p => Math.round(p.bpm)).join(', ')})`);
+  return Math.round(Math.max(40, Math.min(220, bestBpm)));
 }
 
 // ── Note distribution from heatmap ────────────────────────────
@@ -340,136 +370,320 @@ interface SpectralFeatures {
   energyVariance: number;      // 0-1 — dynamic range of frame energies
   noteDensity: number;         // 0-1 — fraction of frames with significant activity
   harmonicComplexity: number;  // 0-1 — chromagram entropy (high=complex harmony)
+  spectralFlux: number;        // 0-1 — average frame-to-frame spectral change (high=rough/distorted)
+  zcr: number;                 // 0-1 — Zero Crossing Rate
+  onsetDensity: number;        // 0-1 — Attacks/beats frequency
 }
 
-const MOOD_MATRIX: Array<[string, number, number]> = [
-  // [mood,          valence, arousal]
-  ["Energetic",    0.80,   0.90],
-  ["Happy",        0.75,   0.40],
-  ["Catchy",       0.60,   0.65],
-  ["Calm",         0.55,  -0.65],
-  ["Romantic",     0.35,  -0.40],
-  ["Bittersweet", -0.05,  -0.15],
-  ["Nostalgic",   -0.25,  -0.35],
-  ["Solemn",      -0.40,  -0.55],
-  ["Melancholy",  -0.55,  -0.25],
-  ["Sad",         -0.75,  -0.70],
-  ["Tense",       -0.45,   0.75],
-  ["Dramatic",    -0.25,   0.85],
-  ["Epic",         0.30,   0.95],
-];
+type MusicStyle = "Rock/Metal" | "Electronic/Dance" | "Acoustic/Folk" | "Pop/Orchestral";
+
+function detectMusicStyle(sf: SpectralFeatures, bpm: number): MusicStyle {
+  if (sf.spectralFlux > 0.45 && sf.zcr > 0.15) {
+    return "Rock/Metal";
+  }
+  if (sf.energyVariance > 0.4 && sf.onsetDensity > 0.4 && sf.brightness > 0.3) {
+    return "Electronic/Dance";
+  }
+  if (sf.spectralFlux < 0.25 && sf.zcr < 0.1 && sf.energyVariance < 0.3) {
+    return "Acoustic/Folk";
+  }
+  return "Pop/Orchestral";
+}
 
 const MOOD_COLORS: Record<string, string> = {
-  Energetic: "var(--mood-energetic)",
-  Happy: "var(--mood-happy)",
-  Catchy: "var(--mood-catchy)",
-  Calm: "var(--mood-calm)",
-  Romantic: "var(--mood-romantic)",
-  Bittersweet: "var(--mood-melancholy)",
-  Nostalgic: "#7c6fd4",
-  Solemn: "#4a5568",
-  Melancholy: "var(--mood-melancholy)",
-  Sad: "var(--mood-sad)",
-  Tense: "var(--mood-tense)",
-  Dramatic: "var(--mood-tense)",
+  // Positive / energetic
+  Energetic: "#f97316",
+  Happy: "#facc15",
+  Groovy: "#f59e0b",
+  Catchy: "#84cc16",
   Epic: "#e67e22",
+  // Peaceful
+  Calm: "#34d399",
+  Dreamy: "#a78bfa",
+  Romantic: "#f472b6",
+  // Bittersweet / mixed
+  Nostalgic: "#7c6fd4",
+  Bittersweet: "#818cf8",
+  // Negative / minor
+  Melancholy: "#60a5fa",
+  Sad: "#3b82f6",
+  Solemn: "#4a5568",
+  // Intense / dark
+  Tense: "#f87171",
+  Dramatic: "#dc2626",
+  Dark: "#1e293b",
+  Intense: "#d35400",
 };
 
 function classifyMood(
   keyInfo: ReturnType<typeof detectKey>,
   bpm: number,
-  notes: NoteDistribution[],
   intervals: number[],
-  sf: SpectralFeatures
-): { primary: string; confidence: number; distribution: MoodDistribution[]; valence: number; arousal: number } {
+  sf: SpectralFeatures,
+  chordProg: ChordProgressionFeatures
+): { primary: string; confidence: number; distribution: MoodDistribution[]; valence: number; arousal: number; style: string } {
 
-  // ── Helper: get solfege percentage by name ──
-  const pct = (name: string) => notes.find(n => n.solfege === name)?.percentage ?? 0;
+  const style = detectMusicStyle(sf, bpm);
 
-  // ── 1. Compute Valence (−1 to +1): multi-factor weighted sum ──
-  // Factor weights: mode(0.30) + brightness(0.15) + harmComplexity(0.15) + chromaConcentration(0.15) + noteInfluence(0.15) + confidence(0.10)
+  // Base Features
+  const isMinor = keyInfo.mode === "Minor";
+  const fast = bpm > 115;
+  const slow = bpm < 85;
+  const highTension = chordProg.avgTension > 0.4;
 
-  // a) Mode contribution: Major = positive, Minor = negative, but not overwhelming
-  const modeVal = keyInfo.mode === "Major" ? 0.35 : -0.35;
+  // ── Archetype scoring — each max ~9 pts, tightly gated ──────────
+  // Rules:
+  //  • Each archetype has unique "fingerprint" conditions — significant overlap is forbidden
+  //  • First condition is a HARD GATE (if not met, score stays 0)
+  //  • Score 0 means archetype is truly absent — no soft minimum
+  const archetypes: Record<string, () => number> = {
 
-  // b) Spectral brightness: bright timbre → slightly more positive
-  const brightnessVal = (sf.brightness - 0.5) * 0.5; // range -0.25..+0.25
+    // ── ENERGETIC ──────────────────────────────────────────────────
+    // Gate: fast tempo + major + high onset
+    Energetic: () => {
+      if (!(!isMinor && fast && sf.onsetDensity > 0.4)) return 0;
+      let s = 3; // gate bonus
+      if (bpm > 130) s += 2;
+      if (sf.brightness > 0.5) s += 2;
+      if (chordProg.majorRatio > 0.7) s += 2;
+      return s;
+    },
 
-  // c) Harmonic complexity: high complexity → more negative (tense/ambiguous)
-  const complexityVal = -(sf.harmonicComplexity - 0.4) * 0.5; // simpler = positive
+    // ── HAPPY ─────────────────────────────────────────────────────
+    // Gate: major mode + valence positive + moderate-to-fast
+    Happy: () => {
+      if (isMinor || chordProg.avgValence < 0.1 || bpm < 80) return 0;
+      let s = 2;
+      if (chordProg.majorRatio > 0.7) s += 2;
+      if (bpm > 100) s += 2;
+      if (sf.brightness > 0.5) s += 1;
+      if (style === "Pop/Orchestral" || style === "Acoustic/Folk") s += 1;
+      return s;
+    },
 
-  // d) Chroma concentration: how focused energy is on few notes
-  //    High concentration = tonal/resolved = positive; spread = ambiguous = negative
-  const topThreeNotePct = notes.slice(0, 3).reduce((s, n) => s + n.percentage, 0);
-  const chromaConcentration = Math.min(1, topThreeNotePct / 60); // 60% in top3 = fully concentrated
-  const concentrationVal = (chromaConcentration - 0.5) * 0.4;
+    // ── GROOVY ────────────────────────────────────────────────────
+    // Gate: dance/electronic style + specific BPM range
+    Groovy: () => {
+      if (!(style === "Electronic/Dance" || style === "Pop/Orchestral")) return 0;
+      if (!(bpm >= 90 && bpm <= 130)) return 0;
+      let s = 3;
+      if (sf.onsetDensity > 0.5) s += 3;
+      if (sf.energyVariance > 0.35) s += 1;
+      if (!isMinor) s += 1;
+      return s;
+    },
 
-  // e) Note-specific influence
-  const doP = pct("1 (Do)");   // root → resolution, positive
-  const solP = pct("5 (Sol)"); // perfect fifth → stable, positive
-  const laP = pct("6 (La)");   // minor 6th → sadder
-  const siP = pct("7 (Si)");   // leading tone → tension
-  const miP = pct("3 (Mi)");   // major 3rd prominence in major = happier
-  let noteVal = 0;
-  noteVal += doP > 18 ? 0.10 : doP > 12 ? 0.05 : 0;
-  noteVal += solP > 16 ? 0.08 : 0;
-  noteVal += miP > 14 ? 0.06 : 0;
-  noteVal -= laP > 20 ? 0.12 : laP > 14 ? 0.06 : 0;
-  noteVal -= siP > 15 ? 0.08 : siP > 10 ? 0.04 : 0;
+    // ── CATCHY ────────────────────────────────────────────────────
+    // Gate: high chord change rate + major dominant + moderate BPM
+    Catchy: () => {
+      if (!(chordProg.changeRate > 0.4 && !isMinor && bpm > 85)) return 0;
+      let s = 2;
+      if (sf.brightness > 0.45) s += 2;
+      if (chordProg.majorRatio > 0.6) s += 2;
+      if (sf.onsetDensity > 0.3) s += 1;
+      return s;
+    },
 
-  // f) Key confidence: stronger detection = stronger valence signal
-  const confScale = 0.75 + (keyInfo.confidence / 100) * 0.25;
+    // ── CALM ──────────────────────────────────────────────────────
+    // Gate: slow + low flux + major or neutral (NOT minor heavy)
+    Calm: () => {
+      if (!(slow && sf.spectralFlux < 0.2 && chordProg.minorRatio < 0.5)) return 0;
+      let s = 3;
+      if (sf.energyVariance < 0.2) s += 2;
+      if (chordProg.changeRate < 0.2) s += 1;
+      if (sf.onsetDensity < 0.25) s += 1;
+      if (style === "Acoustic/Folk") s += 1;
+      return s;
+    },
 
-  let valence = (modeVal + brightnessVal + complexityVal + concentrationVal + noteVal) * confScale;
-  valence = Math.max(-1, Math.min(1, valence));
+    // ── DREAMY ────────────────────────────────────────────────────
+    // Gate: low flux + low ZCR + slow/moderate tempo
+    Dreamy: () => {
+      if (!(sf.spectralFlux < 0.18 && sf.zcr < 0.1 && bpm < 100)) return 0;
+      let s = 3;
+      if (slow) s += 2;
+      if (sf.brightness < 0.45) s += 1;
+      if (chordProg.changeRate < 0.3) s += 1;
+      if (style === "Acoustic/Folk" || style === "Electronic/Dance") s += 1;
+      return s;
+    },
 
-  // ── 2. Compute Arousal (−1 to +1): continuous multi-factor ──
+    // ── ROMANTIC ──────────────────────────────────────────────────
+    // Gate: mid-tempo + must have BOTH major AND some minor + smooth
+    Romantic: () => {
+      if (!(bpm > 55 && bpm < 105)) return 0;
+      if (!(chordProg.majorRatio > 0.35 && chordProg.minorRatio > 0.25)) return 0;
+      let s = 2;
+      if (sf.spectralFlux < 0.25) s += 2;
+      if (sf.brightness < 0.52) s += 1;
+      if (style === "Acoustic/Folk" || style === "Pop/Orchestral") s += 2;
+      if (chordProg.avgValence > 0) s += 1;
+      return s;
+    },
 
-  // a) BPM: continuous sigmoid-like mapping centered at 105 BPM
-  const bpmNorm = (bpm - 105) / 55; // ~50 BPM → -1, ~160 BPM → +1
-  const bpmArousal = Math.tanh(bpmNorm * 1.2); // smooth -1..+1
+    // ── NOSTALGIC ─────────────────────────────────────────────────
+    // Gate: must have CLEAR major-minor balance (bittersweet harmony) + NOT fast
+    Nostalgic: () => {
+      if (bpm > 100) return 0;
+      const mixedChords = chordProg.majorRatio > 0.35 && chordProg.minorRatio > 0.35;
+      if (!mixedChords) return 0;
+      let s = 2;
+      if (sf.brightness > 0.3 && sf.brightness < 0.55) s += 2; // mid-tone brightness
+      if (chordProg.changeRate < 0.4) s += 1;
+      if (style === "Acoustic/Folk" || style === "Pop/Orchestral") s += 2;
+      return s;
+    },
 
-  // b) Spectral brightness: bright = high arousal
-  const brightnessArousal = (sf.brightness - 0.45) * 0.6;
+    // ── BITTERSWEET ───────────────────────────────────────────────
+    // Gate: minor key but with upward harmonic motion (moderate valence)
+    Bittersweet: () => {
+      if (!isMinor) return 0;
+      if (!(chordProg.avgValence > -0.3 && chordProg.avgValence < 0.2)) return 0;
+      let s = 2;
+      if (chordProg.majorRatio > 0.25) s += 2; // some major relief
+      if (bpm > 65 && bpm < 110) s += 1;
+      if (sf.brightness > 0.3) s += 1;
+      if (style === "Pop/Orchestral" || style === "Acoustic/Folk") s += 1;
+      return s;
+    },
 
-  // c) Energy variance: high dynamic range = more arousing
-  const energyArousal = (sf.energyVariance - 0.3) * 0.5;
+    // ── MELANCHOLY ────────────────────────────────────────────────
+    // Gate: minor + low-moderate energy + slower
+    Melancholy: () => {
+      if (!isMinor || bpm > 105) return 0;
+      let s = 2;
+      if (chordProg.minorRatio > 0.55) s += 2;
+      if (slow) s += 2;
+      if (sf.brightness < 0.4) s += 1;
+      if (chordProg.avgValence < -0.1) s += 1;
+      return s;
+    },
 
-  // d) Note density: busy = higher arousal
-  const densityArousal = (sf.noteDensity - 0.5) * 0.4;
+    // ── SAD ───────────────────────────────────────────────────────
+    // Gate: minor + strong negative valence + slow tempo
+    Sad: () => {
+      if (!(isMinor && bpm < 90 && chordProg.avgValence < -0.2)) return 0;
+      let s = 3;
+      if (chordProg.minorRatio > 0.7) s += 2;
+      if (bpm < 75) s += 2;
+      if (sf.energyVariance < 0.25) s += 1;
+      return s;
+    },
 
-  // e) Interval volatility: large leaps = dramatic = higher arousal
-  const avgInterval = intervals.length > 0
-    ? intervals.reduce((a, b) => a + b, 0) / intervals.length : 2;
-  const volatility = Math.min(1, avgInterval / 6);
-  const intervalArousal = (volatility - 0.35) * 0.35;
+    // ── SOLEMN ────────────────────────────────────────────────────
+    // Gate: very slow + very low energy variance + minor
+    Solemn: () => {
+      if (!(bpm < 72 && isMinor && sf.energyVariance < 0.2)) return 0;
+      let s = 3;
+      if (chordProg.avgTension > 0.3) s += 2;
+      if (sf.spectralFlux < 0.18) s += 2;
+      if (style === "Pop/Orchestral" || style === "Acoustic/Folk") s += 1;
+      return s;
+    },
 
-  let arousal = bpmArousal * 0.35 + brightnessArousal + energyArousal + densityArousal + intervalArousal;
-  arousal = Math.max(-1, Math.min(1, arousal));
+    // ── TENSE ─────────────────────────────────────────────────────
+    // Gate: high chord tension + minor + energy building
+    Tense: () => {
+      if (!(highTension && isMinor)) return 0;
+      let s = 3;
+      if (chordProg.avgTension > 0.55) s += 2;
+      if (sf.energyVariance > 0.4) s += 2;
+      if (chordProg.changeRate > 0.35) s += 1;
+      return s;
+    },
 
-  // ── 3. Map (valence, arousal) → moods via softened Gaussian distance ──
-  const SIGMA = 1.4; // softer falloff so secondary moods are more visible
-  const scored = MOOD_MATRIX.map(([name, mv, ma]) => {
-    const dist = Math.sqrt((valence - mv) ** 2 + (arousal - ma) ** 2);
-    const score = Math.exp(-dist * SIGMA);
-    return { mood: name, score };
-  });
+    // ── DRAMATIC ──────────────────────────────────────────────────
+    // Gate: high tension + high energy variance (dynamic contrast)
+    Dramatic: () => {
+      if (!(highTension && sf.energyVariance > 0.5)) return 0;
+      let s = 3;
+      if (chordProg.avgTension > 0.5) s += 2;
+      if (chordProg.changeRate > 0.4) s += 2;
+      if (sf.brightness > 0.35) s += 1;
+      return s;
+    },
 
-  // Apply a minimum floor so no mood is 0%
-  const FLOOR = 0.02; // 2% minimum
-  const totalRaw = scored.reduce((s, m) => s + m.score, 0);
-  const withFloor = scored.map(m => ({
-    ...m,
-    score: Math.max(FLOOR, m.score / (totalRaw || 1)),
-  }));
+    // ── DARK ──────────────────────────────────────────────────────
+    // Gate: minor + low brightness + high tension
+    Dark: () => {
+      if (!(isMinor && sf.brightness < 0.35 && highTension)) return 0;
+      let s = 3;
+      if (chordProg.minorRatio > 0.65) s += 2;
+      if (sf.zcr > 0.1) s += 2; // gritty texture
+      if (chordProg.avgValence < -0.3) s += 1;
+      return s;
+    },
 
-  const totalScore = withFloor.reduce((s, m) => s + m.score, 0);
-  const distribution: MoodDistribution[] = withFloor
+    // ── INTENSE ───────────────────────────────────────────────────
+    // Gate: Rock/Electronic + fast OR high energy variance
+    Intense: () => {
+      if (!(style === "Rock/Metal" || style === "Electronic/Dance")) return 0;
+      if (!(fast || sf.energyVariance > 0.55)) return 0;
+      let s = 3;
+      if (highTension) s += 2;
+      if (sf.energyVariance > 0.55) s += 2;
+      if (chordProg.changeRate > 0.45) s += 1;
+      return s;
+    },
+
+    // ── EPIC ──────────────────────────────────────────────────────
+    // Gate: orchestral/rock + high energy variance + must NOT be predominantly minor
+    Epic: () => {
+      if (!(style === "Pop/Orchestral" || style === "Rock/Metal")) return 0;
+      if (!(sf.energyVariance > 0.5 && sf.brightness > 0.4)) return 0;
+      let s = 3;
+      if (chordProg.majorRatio > 0.45) s += 2;
+      if (chordProg.changeRate > 0.35) s += 2;
+      if (bpm > 90) s += 1;
+      return s;
+    },
+  };
+
+  const scored = Object.entries(archetypes).map(([name, scorer]) => ({
+    mood: name,
+    score: scorer(), // 0 = truly absent, no soft floor
+  })).filter(m => m.score > 0); // completely remove zero-score moods
+
+  // Guard: if nothing scored (extremely sparse audio), fall back to a neutral result
+  if (scored.length === 0) {
+    return { primary: "Calm", confidence: 50, distribution: [{ mood: "Calm", value: 100, color: MOOD_COLORS["Calm"] }], valence: 0, arousal: 0, style };
+  }
+
+  // Calculate faux valence and arousal based on the winner for UI backward compatibility
+  scored.sort((a, b) => b.score - a.score);
+  const primary = scored[0].mood;
+
+  let valence = 0;
+  let arousal = 0;
+  switch (primary) {
+    case "Energetic": valence = 0.7; arousal = 0.9; break;
+    case "Happy": valence = 0.8; arousal = 0.6; break;
+    case "Groovy": valence = 0.5; arousal = 0.7; break;
+    case "Catchy": valence = 0.6; arousal = 0.5; break;
+    case "Epic": valence = 0.4; arousal = 0.8; break;
+    case "Calm": valence = 0.4; arousal = -0.7; break;
+    case "Dreamy": valence = 0.3; arousal = -0.6; break;
+    case "Romantic": valence = 0.5; arousal = -0.3; break;
+    case "Nostalgic": valence = 0.1; arousal = -0.4; break;
+    case "Bittersweet": valence = -0.1; arousal = -0.2; break;
+    case "Melancholy": valence = -0.6; arousal = -0.5; break;
+    case "Sad": valence = -0.8; arousal = -0.6; break;
+    case "Solemn": valence = -0.5; arousal = -0.8; break;
+    case "Tense": valence = -0.4; arousal = 0.7; break;
+    case "Dramatic": valence = -0.3; arousal = 0.8; break;
+    case "Dark": valence = -0.7; arousal = 0.2; break;
+    case "Intense": valence = -0.3; arousal = 0.9; break;
+    default: valence = 0.0; arousal = 0.0;
+  }
+
+  const totalScore = scored.reduce((s, m) => s + m.score ** 2, 0); // Square to emphasize winners
+  const distribution: MoodDistribution[] = scored
     .map(m => ({
       mood: m.mood,
-      value: Math.round((m.score / (totalScore || 1)) * 100),
+      value: Math.round(((m.score ** 2) / totalScore) * 100),
       color: MOOD_COLORS[m.mood] ?? "var(--accent-primary)",
     }))
+    .filter(m => m.value > 0)
     .sort((a, b) => b.value - a.value);
 
   // Ensure values sum to 100
@@ -478,49 +692,125 @@ function classifyMood(
     distribution[0].value += 100 - sum;
   }
 
+  console.log(`[Mood v4-Archetype] Style: ${style} | Winner: ${primary} | ZCR: ${sf.zcr.toFixed(2)} | Flux: ${sf.spectralFlux.toFixed(2)} | Onsets: ${sf.onsetDensity.toFixed(2)}`);
+
   return {
     primary: distribution[0].mood,
     confidence: distribution[0].value,
     distribution,
-    valence: Math.round(valence * 100) / 100,
-    arousal: Math.round(arousal * 100) / 100,
+    valence,
+    arousal,
+    style
+  };
+}
+
+// ── Lyric-Audio Mood Fusion ──────────────────────────────────────
+// Re-weights the audio mood distribution using lyric sentiment.
+// Prevents cases like "death-themed lyrics" scoring as "Happy".
+function fuseMoodWithLyrics(
+  mood: { primary: string; confidence: number; distribution: MoodDistribution[]; valence: number; arousal: number; style: string },
+  lyricMood: string
+): typeof mood {
+  if (!lyricMood || lyricMood === "Reflective") return mood; // Neutral — no adjustment
+
+  // Maps each lyricMood to boost/penalize multipliers for audio archetypes.
+  // Boosts > 1.0 amplify that archetype; penalties < 1.0 suppress it.
+  const FUSION_MAP: Record<string, Record<string, number>> = {
+    Happy: {
+      Happy: 1.5, Groovy: 1.4, Energetic: 1.3, Catchy: 1.2,
+      Melancholy: 0.6, Sad: 0.5, Dark: 0.6, Bittersweet: 0.7,
+    },
+    Sad: {
+      Sad: 1.6, Melancholy: 1.5, Nostalgic: 1.3, Bittersweet: 1.2,
+      Dark: 1.1, Dramatic: 1.1,
+      Happy: 0.5, Groovy: 0.5, Energetic: 0.6, Catchy: 0.6, Epic: 0.7,
+    },
+    Romantic: {
+      Romantic: 1.7, Dreamy: 1.5, Calm: 1.3, Nostalgic: 1.1,
+      Intense: 0.6, Dark: 0.6, Groovy: 0.7,
+    },
+    Angry: {
+      Intense: 1.6, Dark: 1.4, Dramatic: 1.3, Tense: 1.2,
+      Happy: 0.5, Romantic: 0.5, Calm: 0.6, Dreamy: 0.6, Groovy: 0.6,
+    },
+  };
+
+  const multipliers = FUSION_MAP[lyricMood] ?? {};
+
+  // Apply multipliers to raw values
+  const fused = mood.distribution.map(d => ({
+    ...d,
+    value: d.value * (multipliers[d.mood] ?? 1.0),
+  })).filter(d => d.value > 0);
+
+  // Re-normalize to 100%
+  const total = fused.reduce((s, d) => s + d.value, 0);
+  if (total === 0) return mood;
+  const normalized = fused.map(d => ({
+    ...d,
+    value: Math.round((d.value / total) * 100),
+  })).sort((a, b) => b.value - a.value);
+
+  // Fix rounding drift on top item
+  const normSum = normalized.reduce((s, d) => s + d.value, 0);
+  if (normalized.length > 0) normalized[0].value += 100 - normSum;
+
+  const newPrimary = normalized[0]?.mood ?? mood.primary;
+  console.log(`[FuseMood] lyricMood=${lyricMood} audio=${mood.primary} → fused=${newPrimary}`);
+
+  return {
+    ...mood,
+    primary: newPrimary,
+    confidence: normalized[0]?.value ?? mood.confidence,
+    distribution: normalized,
   };
 }
 
 
-// ── Explanation generator ──────────────────────────────────────
 function generateExplanation(
   keyInfo: ReturnType<typeof detectKey>,
   bpm: number,
-  mood: { primary: string },
+  mood: { primary: string; style?: string },
   notes: NoteDistribution[]
 ): string {
   const top = notes[0];
   const tempoDesc = bpm > 120 ? "cepat" : bpm > 80 ? "sedang" : "lambat";
   const modeIndo = keyInfo.mode === "Major" ? "Mayor" : "Minor";
-  
+
   return (
-    `Lagu ini terdeteksi berada di nada dasar ${keyInfo.root} ${modeIndo} (kepercayaan ${keyInfo.confidence}%) ` +
-    `dengan tempo ${tempoDesc} sebesar ${bpm} BPM. ` +
+    `Lagu ini terdeteksi berada di gaya musik ${mood.style || "Pop/Orchestral"} dengan nada dasar ${keyInfo.root} ${modeIndo} (kepercayaan ${keyInfo.confidence}%) ` +
+    `serta tempo ${tempoDesc} sebesar ${bpm} BPM. ` +
     `Nada solfeggio yang paling dominan adalah ${top?.solfege} (${top?.absolute}) ` +
     `dengan persentase ${top?.percentage}%. ` +
-    `Kombinasi tonalitas ${modeIndo.toLowerCase()} dan tempo yang ${tempoDesc} ` +
-    `menempatkan lagu ini dalam kategori emosional "${mood.primary}". ` +
+    `Kombinasi progresi akord, tekstur suara (distorsi/kebersihan), dan energi berirama ` +
+    `menempatkan lagu ini secara kuat dalam kategori emosional "${mood.primary}". ` +
     `Skala dasar: ${keyInfo.mode === "Major" ? "Mayor (1-2-3-4-5-6-7)" : "Minor Natural (1-2-♭3-4-5-♭6-♭7)"}.`
   );
 }
 
-// ── Interval calculation ───────────────────────────────────────
+// ── Interval calculation (semitone-based) ─────────────────────
+// Maps solfeggio degree → semitones from root for meaningful interval measurement.
+// Uses major-scale semitone offsets: Do=0, Re=2, Mi=4, Fa=5, Sol=7, La=9, Si=11
+const DEGREE_TO_SEMITONE = [0, 2, 4, 5, 7, 9, 11]; // Do Re Mi Fa Sol La Si
+
 function computeIntervals(heatmap: number[][]): number[] {
-  const peaks: number[] = heatmap.map(slice => {
+  // For each frame, find the dominant solfeggio degree and convert to semitones
+  const semitones: number[] = heatmap.map(slice => {
     let maxIdx = 0;
-    for (let i = 1; i < slice.length; i++) if (slice[i] > slice[maxIdx]) maxIdx = i;
-    return maxIdx % 7;
+    for (let i = 1; i < slice.length; i++) {
+      if (slice[i] > slice[maxIdx]) maxIdx = i;
+    }
+    const degree = maxIdx % 7;
+    return DEGREE_TO_SEMITONE[degree];
   });
+
+  // Compute semitone intervals between consecutive frames
   const intervals: number[] = [];
-  for (let i = 1; i < peaks.length && intervals.length < 20; i++) {
-    const diff = Math.abs(peaks[i] - peaks[i - 1]);
-    if (diff > 0) intervals.push(diff);
+  for (let i = 1; i < semitones.length && intervals.length < 40; i++) {
+    // Circular semitone distance (within octave, max 6 semitones = tritone)
+    const raw = Math.abs(semitones[i] - semitones[i - 1]);
+    const dist = Math.min(raw, 12 - raw);
+    if (dist > 0) intervals.push(dist);
   }
   return intervals;
 }
@@ -607,7 +897,17 @@ export async function analyzeAudio(
   // 1.5 Fetch synced lyrics — LRCLIB first, Groq Whisper as fallback
   // Stage 1 runs NON-BLOCKING in parallel with FFT analysis.
   // Stage 2 (Groq Whisper) is triggered only if LRCLIB returns 0 synced lines.
-  const songId = file.name.replace(/\.[^/.]+$/, '');
+  const songIdRaw = file.name.replace(/\.[^/.]+$/, '');
+
+  // 1. Ubah underscore & hyphen jadi spasi
+  let songId = songIdRaw.replace(/[_-]+/g, ' ');
+
+  // 2. Hapus kata-kata "sampah" hasil download (case-insensitive)
+  const fluffWords = /\b(audio|official|video|lyrics|lyric|hd|hq|128kbps|320kbps|kbps|mp3|original|music|y2meta|app)\b/gi;
+  songId = songId.replace(fluffWords, '');
+
+  // 3. Bersihkan spasi ganda dan spasi di ujung teks
+  songId = songId.replace(/\s+/g, ' ').trim();
 
   const sttPromise: Promise<any[]> = (async () => {
     // ── Stage 1: LRCLIB (fast, ~500ms) ──
@@ -674,18 +974,23 @@ export async function analyzeAudio(
   // 1.8 Auto-detect frequency range + brightness for adaptive analysis
   onProgress(14);
   const audioProfile = detectAudioProfile(samples, sampleRate);
-  // Override config with auto-detected values (user config acts as fallback)
-  const effectiveMinFreq = audioProfile.minFreq;
-  const effectiveMaxFreq = audioProfile.maxFreq;
+
+  // Use auto-detected values only if autoFreq is enabled, otherwise use user config
+  const effectiveMinFreq = config.autoFreq ? audioProfile.minFreq : config.minFreq;
+  const effectiveMaxFreq = config.autoFreq ? audioProfile.maxFreq : config.maxFreq;
 
   const chroma = new Float32Array(12);
   const spectrogramRaw: number[][] = [];
   const vocalPresenceRaw: number[] = []; // for lyrics/vocal detector
 
-  // Spectral feature accumulators (for mood v2)
+  // Spectral feature accumulators (for mood v2/v3)
   let spectralCentroidSum = 0;
   let spectralCentroidCount = 0;
   const frameEnergies: number[] = [];
+  let prevMagForFlux: Float32Array | null = null;
+  const fluxValues: number[] = [];
+  const zcrValues: number[] = [];
+  const frameChromasForChords: number[][] = []; // per-frame chroma for chord detection
 
   // Store compact magnitude spectrum (musical range only) per frame for solfeggiogram
   const compactSpectra: Float32Array[] = [];
@@ -703,7 +1008,17 @@ export async function analyzeAudio(
     }
 
     const slice = new Float32Array(fftSize);
-    for (let i = 0; i < fftSize; i++) slice[i] = samples[pos + i];
+    let zeroCrossings = 0;
+    for (let i = 0; i < fftSize; i++) {
+      slice[i] = samples[pos + i];
+      if (i > 0) {
+        if ((slice[i - 1] >= 0 && slice[i] < 0) || (slice[i - 1] < 0 && slice[i] >= 0)) {
+          zeroCrossings++;
+        }
+      }
+    }
+    zcrValues.push(zeroCrossings / fftSize);
+
     const windowed = applyWindow(slice, config.windowType);
 
     const real = Array.from(windowed);
@@ -714,8 +1029,11 @@ export async function analyzeAudio(
     // Spectrogram bands (log-spaced)
     spectrogramRaw.push(computeLogBands(mag, sampleRate, fftSize, config.minFreq, config.maxFreq, SPEC_BANDS));
 
-    // Chromagram
-    updateChromagram(mag, sampleRate, fftSize, chroma);
+    // Chromagram — accumulate global + store per-frame for chord detection
+    const frameChroma = new Float32Array(12);
+    updateChromagram(mag, sampleRate, fftSize, frameChroma);
+    for (let i = 0; i < 12; i++) chroma[i] += frameChroma[i];
+    frameChromasForChords.push(Array.from(frameChroma));
 
     // Vocal/Lyrics Presence (300Hz - 3000Hz energy ratio)
     let totalE = 0, vocalE = 0;
@@ -741,6 +1059,18 @@ export async function analyzeAudio(
 
     // Frame energy for variance computation
     frameEnergies.push(totalE);
+
+    // Spectral flux: half-wave rectified difference from previous frame
+    if (prevMagForFlux) {
+      let flux = 0;
+      const bins = Math.min(mag.length, prevMagForFlux.length);
+      for (let i = 1; i < bins; i++) {
+        const diff = mag[i] - prevMagForFlux[i];
+        if (diff > 0) flux += diff;
+      }
+      fluxValues.push(flux);
+    }
+    prevMagForFlux = mag;
 
     // Store compact musical-range spectrum for solfeggiogram rebuild
     compactSpectra.push(mag.slice(musicalBinMin, musicalBinMax + 1));
@@ -800,14 +1130,16 @@ export async function analyzeAudio(
     : 0;
   const energyVariance = meanEnergy > 0 ? Math.min(1, rawVariance / meanEnergy) : 0; // coefficient of variation
 
-  // Note density: fraction of heatmap frames with significant activity
-  const ACTIVITY_THRESHOLD = 0.15;
-  let activeFrames = 0;
-  for (const frame of heatmapSmoothed) {
-    const maxVal = Math.max(...frame);
-    if (maxVal > ACTIVITY_THRESHOLD) activeFrames++;
+  // Note density: mean activity level per frame (continuous, not binary)
+  // Uses the average of max-values across frames — gives more granularity
+  // than a simple threshold count, especially after smoothing.
+  let activitySum = 0;
+  for (const fr of heatmapSmoothed) {
+    const maxVal = Math.max(...fr);
+    activitySum += maxVal;
   }
-  const noteDensity = heatmapSmoothed.length > 0 ? activeFrames / heatmapSmoothed.length : 0;
+  const noteDensity = heatmapSmoothed.length > 0
+    ? Math.min(1, activitySum / heatmapSmoothed.length) : 0;
 
   // Harmonic complexity: Shannon entropy of normalized chromagram
   const chromaTotal = normalizedChroma.reduce((s, v) => s + v, 0);
@@ -819,21 +1151,118 @@ export async function analyzeAudio(
     harmonicComplexity = entropy / maxEntropy; // normalize to 0-1
   }
 
-  const spectralFeatures: SpectralFeatures = { brightness, energyVariance, noteDensity, harmonicComplexity };
-  const mood = classifyMood(keyInfo, bpm, dominantNotes, intervals, spectralFeatures);
+  // Spectral flux: average frame-to-frame spectral change, normalized
+  let spectralFlux = 0;
+  let onsetDensity = 0;
+  if (fluxValues.length > 0) {
+    const meanFlux = fluxValues.reduce((a, b) => a + b, 0) / fluxValues.length;
+    spectralFlux = Math.min(1, meanFlux / 20);
+
+    // Calculate onset density (peaks in spectral flux)
+    const threshold = meanFlux * 1.5;
+    let onsets = 0;
+    for (let i = 1; i < fluxValues.length - 1; i++) {
+      if (fluxValues[i] > threshold && fluxValues[i] > fluxValues[i - 1] && fluxValues[i] > fluxValues[i + 1]) {
+        onsets++;
+      }
+    }
+    // Normalize against expected max onsets per frame
+    onsetDensity = Math.min(1, onsets / (fluxValues.length * 0.3));
+  }
+
+  const avgZcr = zcrValues.length > 0 ? zcrValues.reduce((a, b) => a + b, 0) / zcrValues.length : 0;
+
+  const spectralFeatures: SpectralFeatures = { brightness, energyVariance, noteDensity, harmonicComplexity, spectralFlux, zcr: avgZcr, onsetDensity };
+
+  // 7b. Chord detection from per-frame chromagrams
+  // Window ~8 frames together for stable chord detection (~0.5s per window)
+  const CHORD_WINDOW = 8;
+  const detectedChords: ReturnType<typeof detectChordFromChroma>[] = [];
+  for (let w = 0; w < frameChromasForChords.length; w += CHORD_WINDOW) {
+    const windowEnd = Math.min(w + CHORD_WINDOW, frameChromasForChords.length);
+    const avgChroma = new Array(12).fill(0);
+    for (let f = w; f < windowEnd; f++) {
+      for (let c = 0; c < 12; c++) avgChroma[c] += frameChromasForChords[f][c];
+    }
+    const count = windowEnd - w;
+    for (let c = 0; c < 12; c++) avgChroma[c] /= count;
+    detectedChords.push(detectChordFromChroma(avgChroma));
+  }
+  const chordProgression = analyzeChordProgression(detectedChords);
+  console.log(
+    `[Chords] ${detectedChords.length} windows → maj=${(chordProgression.majorRatio * 100).toFixed(0)}% ` +
+    `min=${(chordProgression.minorRatio * 100).toFixed(0)}% tension=${chordProgression.avgTension.toFixed(2)} ` +
+    `valence=${chordProgression.avgValence.toFixed(3)} changeRate=${chordProgression.changeRate.toFixed(2)}`
+  );
+
+  const mood = classifyMood(keyInfo, bpm, intervals, spectralFeatures, chordProgression);
   onProgress(95);
 
   // 8. Normalize
   const spectrogramData = normalizeDb(spectrogramRaw);
   const heatmapData = heatmapSmoothed;
 
-  // 9. Tension peaks — based on musical parts (broadband acoustic energy / loudness)
-  // Instead of just pitch density, we use the total energy of the spectrogram (including bass/drums)
-  const rawEnergies = spectrogramRaw.map(row => row.reduce((a, b) => a + b, 0));
+  // ── Await STT (LRCLIB) for Lyric-Aware Tension Peaks ──
+  onProgress(95);
+  let lyricsData: { text: string; timestamp: [number, number] }[] = [];
+  try {
+    lyricsData = await sttPromise;
+    console.log(`Lirik diterima: ${lyricsData.length} segmen`);
+  } catch (e) {
+    console.error("STT await error:", e);
+  }
 
-  // Smooth the energy over a window (e.g. 5 frames) to find sustained intense sections (like a chorus), not just brief drum hits
-  const windowSize = 5;
-  const smoothedEnergies = rawEnergies.map((_, i, arr) => {
+  // Pre-calculate lyric starts (frames where a lyric line begins)
+  const lyricStartFrames = new Set<number>();
+  lyricsData.forEach(l => {
+    // timestamp[0] is start time in seconds
+    const startFrame = Math.floor(l.timestamp[0] * sampleRate / hopSize);
+    // Allow a small window (±2 frames) to count as a lyric start
+    for (let f = startFrame - 2; f <= startFrame + 2; f++) {
+      if (f >= 0) lyricStartFrames.add(f);
+    }
+  });
+
+  // 9. Tension peaks — Structural & Perceptual Analysis (Chorus/Drop Detection)
+  // Normalize flux values
+  const maxFlux = Math.max(...fluxValues, 0.01);
+  const normFlux = fluxValues.map(v => v / maxFlux);
+
+  // Note density per frame
+  const frameDensity = heatmapSmoothed.map(row => row.reduce((a, b) => a + b, 0) / HEATMAP_ROWS);
+  const maxDensity = Math.max(...frameDensity, 0.01);
+  const normDensity = frameDensity.map(v => v / maxDensity);
+
+  // Per-frame brightness (from log-bands)
+  const frameBrightness = spectrogramRaw.map(bands => {
+    let weighted = 0, sum = 0;
+    bands.forEach((v, i) => { weighted += v * (i / SPEC_BANDS); sum += v; });
+    return sum > 0 ? weighted / sum : 0;
+  });
+
+  const rawCompositeTension = spectrogramRaw.map((_, i) => {
+    // 1. Energy factor (20%) - Normalized to mean energy
+    const eNorm = meanEnergy > 0 ? Math.min(1.5, (frameEnergies[i] ?? 0) / meanEnergy) : 0;
+
+    // 2. Arrangement Density (25%) - Thickness of the sound
+    const d = normDensity[i] ?? 0;
+
+    // 3. Spectral Flux (20%) - Rapid changes/transients (impact)
+    const f = normFlux[i] ?? 0;
+
+    // 4. High-Freq Focus / Brightness (15%) - Drops/Reff usually have more high-end energy
+    const b = frameBrightness[i] ?? 0;
+
+    // 5. Lyric Presence (20%) - Game changer: boosts tension at the exact moment a vocal line hits
+    const lyricBoost = lyricStartFrames.has(i) ? 1.0 : 0;
+
+    // Composite formula
+    return (eNorm * 0.20) + (d * 0.25) + (f * 0.20) + (b * 0.15) + (lyricBoost * 0.20);
+  });
+
+  // Smooth the composite tension over a larger window to find sustained intense sections
+  const windowSize = 12; // ~8s window for better structural detection
+  const smoothedTension = rawCompositeTension.map((_, i, arr) => {
     let sum = 0, count = 0;
     for (let j = Math.max(0, i - windowSize); j <= Math.min(arr.length - 1, i + windowSize); j++) {
       sum += arr[j]; count++;
@@ -841,24 +1270,48 @@ export async function analyzeAudio(
     return sum / count;
   });
 
-  const avgE = smoothedEnergies.reduce((a, b) => a + b, 0) / (smoothedEnergies.length || 1);
-  const stdE = Math.sqrt(smoothedEnergies.map(e => (e - avgE) ** 2).reduce((a, b) => a + b, 0) / (smoothedEnergies.length || 1));
-  const threshold = avgE + stdE * 0.8;
+  const avgTension = smoothedTension.reduce((a, b) => a + b, 0) / (smoothedTension.length || 1);
+  const stdTension = Math.sqrt(smoothedTension.map(e => (e - avgTension) ** 2).reduce((a, b) => a + b, 0) / (smoothedTension.length || 1));
+
+  // Dynamic threshold: peaks must be significantly higher than average
+  const threshold = avgTension + stdTension * 0.6;
+
+  // NOVELTY / DROPS DETECTION:
+  // Instead of picking the center of the chorus (where smoothed tension is highest),
+  // we want the exact FIRST beat of the drop.
+  // We calculate "Novelty": how much the tension suddenly jumped compared to a few seconds ago.
+  const impactTension = rawCompositeTension.map((raw, i) => {
+    const pastSmoothed = smoothedTension[Math.max(0, i - 10)] ?? 0;
+    const currentSmoothed = smoothedTension[i];
+    // Novelty = jump in structural energy (only positive jumps)
+    const novelty = Math.max(0, currentSmoothed - pastSmoothed);
+
+    // Impact = The raw transient (cymbal/kick) multiplied by the suddenness of the drop
+    return raw * novelty;
+  });
 
   // Find local maxima that exceed threshold
   const candidates: { sec: number, e: number }[] = [];
-  for (let i = 1; i < smoothedEnergies.length - 1; i++) {
-    if (smoothedEnergies[i] > threshold && smoothedEnergies[i] > smoothedEnergies[i - 1] && smoothedEnergies[i] > smoothedEnergies[i + 1]) {
-      candidates.push({ sec: (i / TARGET_SLICES) * buffer.duration, e: smoothedEnergies[i] });
+  for (let i = 2; i < impactTension.length - 2; i++) {
+    // Only consider points that are entering structurally intense sections
+    if (smoothedTension[i] > threshold) {
+      const val = impactTension[i];
+      // Find local peak in the exact drop/impact timeline
+      if (val > impactTension[i - 1] && val > impactTension[i - 2] &&
+        val > impactTension[i + 1] && val > impactTension[i + 2]) {
+        // Calculate exact time based on hopSize and sampleRate
+        const exactSeconds = (i * hopSize + (fftSize / 2)) / sampleRate;
+        candidates.push({ sec: exactSeconds, e: val });
+      }
     }
   }
 
-  // Sort by energy and pick top 4, ensuring they are at least 5 seconds apart
+  // Sort by drop intensity and pick top 4, ensuring they are at least 15 seconds apart
   candidates.sort((a, b) => b.e - a.e);
   const tensionPeaks: number[] = [];
   for (const c of candidates) {
     if (tensionPeaks.length >= 4) break;
-    if (!tensionPeaks.some(p => Math.abs(p - c.sec) < 5)) {
+    if (!tensionPeaks.some(p => Math.abs(p - c.sec) < 15)) {
       tensionPeaks.push(Math.round(c.sec));
     }
   }
@@ -874,21 +1327,13 @@ export async function analyzeAudio(
     return Math.max(0, Math.min(1, ((sum / count) - 0.2) * 2));
   });
 
-  // Await STT (LRCLIB)
-  onProgress(95);
-  let lyricsData: { text: string; timestamp: [number, number] }[] = [];
-  try {
-    lyricsData = await sttPromise;
-    console.log(`🎵 Lirik diterima: ${lyricsData.length} segmen`);
-  } catch (e) {
-    console.error("STT await error:", e);
-  }
 
   // Generate Dynamic Narrative using LLM (Groq)
   let explanation = generateExplanation(keyInfo, bpm, mood, dominantNotes); // Fallback string
+  let lyricMood = "Reflective"; // Default
   try {
     const plainLyrics = lyricsData.map(l => l.text).join('\n');
-    
+
     // 15 second timeout for narrative generation
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
@@ -913,12 +1358,33 @@ export async function analyzeAudio(
       } else if (narrativeData.fallback) {
         explanation = narrativeData.fallback;
       }
+      if (narrativeData.lyricMood) {
+        lyricMood = narrativeData.lyricMood;
+      }
     }
   } catch (err) {
     console.error("Failed to generate narrative:", err);
   }
 
+  // ── Fuse audio mood + lyric sentiment for final distribution ──
+  const fusedMood = fuseMoodWithLyrics(mood, lyricMood);
+
   onProgress(100);
+
+  // 11. Generate waveform data (downsampled min/max per slice)
+  const waveformSlices = spectrogramRaw.length; // match spectrogram time resolution
+  const samplesPerSlice = Math.floor(totalSamples / waveformSlices);
+  const waveformData: [number, number][] = [];
+  for (let s = 0; s < waveformSlices; s++) {
+    const start = s * samplesPerSlice;
+    const end = Math.min(start + samplesPerSlice, totalSamples);
+    let mn = 0, mx = 0;
+    for (let i = start; i < end; i++) {
+      if (samples[i] < mn) mn = samples[i];
+      if (samples[i] > mx) mx = samples[i];
+    }
+    waveformData.push([mn, mx]);
+  }
 
   return {
     key: keyInfo,
@@ -926,7 +1392,8 @@ export async function analyzeAudio(
     timeSignature: "4/4",
     totalNotes: dominantNotes.reduce((s, n) => s + n.count, 0),
     dominantNotes,
-    mood,
+    mood: fusedMood,
+    lyricMood,
     chromagram: normalizedChroma.map((v, i) => ({ note: NOTE_NAMES[i], value: v })),
     explanation,
     intervals,
@@ -937,5 +1404,6 @@ export async function analyzeAudio(
     processingTime: Math.round(performance.now() - t0),
     duration: buffer.duration,
     tensionPeaks,
+    waveformData,
   };
 }
