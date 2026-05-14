@@ -170,27 +170,27 @@ Tension peaks are found using a **Novelty-Based Structural Analysis**, not simpl
 
 ## Changelog
 
-### [v0.4.0] — 2025-05-15 (Current)
+### [v0.4.0] — 2026-05-15 (Current)
 - **NEW** Novelty-based tension peak detection targeting the exact first beat of drops
 - **NEW** Lyric-aware tension peak support using LRC timestamps (20% weight)
 - **NEW** Whisper-Guided Hybrid Lyric Search: `LRCLIB → Whisper transcribe → LRCLIB by lyrics → Whisper fallback`
 - **IMPROVED** Fusion multiplier matrix halved to reduce lyric over-dominance
 - **FIXED** Crash on empty `scored` array in `classifyMood` (guard moved before access)
 
-### [v0.3.0] — 2025-05-14
+### [v0.3.0] — 2026-05-14
 - **NEW** 17-archetype gated mood engine replacing loose heuristics
 - **NEW** Lyric-Audio Mood Fusion via Groq LLM semantic classification
 - **NEW** Redesigned waveform visualization with dual-layer mirrored bars & HSL gradients
 - **REMOVED** Chroma Radar visualization (inaccurate, replaced by archetype engine)
 - **IMPROVED** Valence/Arousal mapped for all 17 archetypes
 
-### [v0.2.0] — 2025-05-12
+### [v0.2.0] — 2026-05-12
 - **NEW** Chord detection with per-frame chromagram windowing
 - **NEW** Spectral Flux & Onset Density for mood scoring
 - **NEW** Solfeggio heatmap per-row normalization
 - **IMPROVED** BPM detection with octave correction based on detected brightness
 
-### [v0.1.0] — 2025-05-10 (Initial)
+### [v0.1.0] — 2026-05-10 (Initial)
 - Client-side FFT pipeline with Hann, Hamming & Blackman window options
 - Spectrogram, Solfeggio Heatmap, BPM, Key detection
 - LRCLIB synced lyric retrieval with Redis caching
