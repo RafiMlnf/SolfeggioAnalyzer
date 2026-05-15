@@ -1,27 +1,54 @@
 import { NextResponse } from 'next/server';
 
+// Bypass local certificate expiration issues during fetch
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 const GROQ_API_KEY = process.env.GROQ_API_KEY || '';
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { key, mode, bpm, mood, topSolfegge, lyrics } = body;
+    const { key, mode, bpm, mood, topSolfegge, lyrics, songTitle, lang = "id" } = body;
+    const isEn = lang === "en";
 
     if (!GROQ_API_KEY) {
+      const fallback = isEn 
+        ? `This song is in the key of ${key} ${mode} with a tempo of ${bpm} BPM. The primary mood is ${mood}. The dominant notes are ${topSolfegge}.`
+        : `Lagu ini berada di nada dasar ${key} ${mode} dengan tempo ${bpm} BPM. Nuansa utamanya adalah ${mood}. Nada dominan yang sering muncul adalah ${topSolfegge}.`;
       return NextResponse.json({
         error: 'GROQ_API_KEY is missing in .env.local',
-        fallback: `Lagu ini berada di nada dasar ${key} ${mode} dengan tempo ${bpm} BPM. Nuansa utamanya adalah ${mood}. Nada dominan yang sering muncul adalah ${topSolfegge}.`
+        fallback
       });
     }
 
     // Limit lyrics length to prevent exceeding token limits
     const truncatedLyrics = lyrics && lyrics.length > 1000
       ? lyrics.substring(0, 1000) + '...'
-      : (lyrics || 'Tidak ada lirik yang ditemukan untuk lagu ini.');
+      : (lyrics || (isEn ? 'No lyrics found for this song.' : 'Tidak ada lirik yang ditemukan untuk lagu ini.'));
+
+    // Attempt to fetch exact genre from iTunes API
+    let itunesGenre = "";
+    if (songTitle) {
+      try {
+        const itunesRes = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(songTitle)}&entity=song&limit=1`, {
+          signal: AbortSignal.timeout(3000)
+        });
+        if (itunesRes.ok) {
+          const itunesData = await itunesRes.json();
+          if (itunesData.results && itunesData.results.length > 0) {
+            itunesGenre = itunesData.results[0].primaryGenreName;
+            console.log(`[iTunes API] Found genre for "${songTitle}": ${itunesGenre}`);
+          }
+        }
+      } catch (err) {
+        console.warn("[iTunes API] Fetch failed or timeout:", err);
+      }
+    }
 
     const prompt = `Data Musik:
-- Nada Dasar: ${key} ${mode}
+- Judul Lagu: ${songTitle || (isEn ? "Unknown" : "Tidak diketahui")}
+${itunesGenre ? `- Genre Resmi (iTunes): ${itunesGenre}\n` : ''}- Nada Dasar: ${key} ${mode}
 - Tempo: ${bpm} BPM
 - Mood Audio: ${mood}
 - Nada Dominan: ${topSolfegge}
@@ -30,12 +57,14 @@ Lirik Lagu:
 "${truncatedLyrics}"
 
 Tugas:
-Analisis makna lagu ini berdasarkan liriknya. Gunakan kepintaranmu untuk memahami metafora, sindiran, atau makna tersirat (misal: lagu sedih yang dibalut nada ceria).
+1. Identifikasi genre asli dari lagu "${songTitle || (isEn ? "this song" : "ini")}" berdasarkan pengetahuan umum Anda tentang musik (seperti yang tertera di Spotify/Apple Music). JANGAN menebak genre murni dari data audio jika Anda mengenali lagunya. Jika lagu tidak dikenali, barulah tebak genre dari data audio dan lirik.${itunesGenre ? `\nCATATAN PENTING: Gunakan "${itunesGenre}" sebagai salah satu output genre utama Anda karena itu adalah data resmi dari iTunes/Apple Music.` : ''}
+2. Analisis makna lagu ini berdasarkan lirik dan audio teknisnya. Gunakan kepintaranmu untuk memahami metafora atau makna tersirat.
 
 Keluarkan jawaban HANYA dalam format JSON yang valid, dengan struktur persis seperti ini:
 {
-  "narrative": "Narasi analisis mendalam (3-4 kalimat) dalam Bahasa Indonesia. Hubungkan antara makna lirik dengan aspek teknis audio (tempo, nada dasar). Gunakan gaya puitis, santai/informal namun berwawasan. Langsung ke inti.",
-  "lyricMood": "Pilih SATU klasifikasi yang paling tepat dari 5 opsi ini: Happy, Sad, Romantic, Angry, Reflective"
+  "narrative": "Narasi analisis mendalam (3-4 kalimat) dalam ${isEn ? 'Bahasa Inggris' : 'Bahasa Indonesia'}. Hubungkan antara makna lirik dengan aspek teknis audio (tempo, nada dasar).",
+  "lyricMood": "Pilih SATU klasifikasi yang paling tepat dari 5 opsi ini: Happy, Sad, Romantic, Angry, Reflective",
+  "genres": ["Genre Resmi 1", "Genre Resmi 2"] // Isi dengan genre resmi (seperti di Spotify). Jika tidak tahu, tebak berdasarkan fitur audio.
 }`;
 
     const groqRes = await fetch(GROQ_URL, {
@@ -49,7 +78,9 @@ Keluarkan jawaban HANYA dalam format JSON yang valid, dengan struktur persis sep
         messages: [
           {
             role: 'system',
-            content: 'Anda adalah kritikus musik dan analis sastra Indonesia. Anda HANYA membalas dengan JSON yang valid, tanpa markdown tambahan.'
+            content: isEn 
+              ? 'You are a music critic and literary analyst. You ONLY reply with valid JSON, without extra markdown. Generate the "narrative" in English.'
+              : 'Anda adalah kritikus musik dan analis sastra Indonesia. Anda HANYA membalas dengan JSON yang valid, tanpa markdown tambahan. Hasilkan "narrative" dalam Bahasa Indonesia.'
           },
           { role: 'user', content: prompt }
         ],
@@ -77,18 +108,20 @@ Keluarkan jawaban HANYA dalam format JSON yang valid, dengan struktur persis sep
       console.error("Failed to parse Groq JSON:", e);
       parsedContent = {
         narrative: contentString,
-        lyricMood: "Reflective"
+        lyricMood: "Reflective",
+        genres: []
       };
     }
 
-    return NextResponse.json({ 
+    return NextResponse.json({
       narrative: parsedContent.narrative || "Gagal menghasilkan narasi.",
-      lyricMood: parsedContent.lyricMood || "Reflective"
+      lyricMood: parsedContent.lyricMood || "Reflective",
+      genres: Array.isArray(parsedContent.genres) ? parsedContent.genres : []
     });
   } catch (error) {
     console.error('Narrative generation error:', error);
     // Return a fallback explanation if API fails
     const fallback = `Lagu ini memiliki nuansa yang unik berdasarkan komposisinya.`;
-    return NextResponse.json({ error: String(error), fallback, lyricMood: "Reflective" });
+    return NextResponse.json({ error: String(error), fallback, lyricMood: "Reflective", genres: [] });
   }
 }

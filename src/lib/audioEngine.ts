@@ -377,17 +377,86 @@ interface SpectralFeatures {
 
 type MusicStyle = "Rock/Metal" | "Electronic/Dance" | "Acoustic/Folk" | "Pop/Orchestral";
 
-function detectMusicStyle(sf: SpectralFeatures, bpm: number): MusicStyle {
-  if (sf.spectralFlux > 0.45 && sf.zcr > 0.15) {
-    return "Rock/Metal";
+function detectGenreDistribution(
+  sf: SpectralFeatures, 
+  bpm: number,
+  keyInfo: ReturnType<typeof detectKey>,
+  chordProg: ChordProgressionFeatures
+): { style: string; distribution: GenreDistribution[] } {
+  let rockScore = 0;
+  let electroScore = 0;
+  let acousticScore = 0;
+  let popScore = 0;
+  let altRockScore = 0;
+  let hipHopScore = 0;
+  let synthwaveScore = 0;
+  const isMinor = keyInfo.mode === "Minor";
+
+  // Rock/Metal
+  if (sf.spectralFlux > 0.4) rockScore += 3;
+  if (sf.zcr > 0.12) rockScore += 2;
+  if (bpm > 120) rockScore += 1;
+
+  // Alternative Rock / Indie
+  if (sf.spectralFlux > 0.25 && sf.spectralFlux <= 0.4) altRockScore += 2;
+  if (sf.zcr > 0.08 && sf.zcr <= 0.15) altRockScore += 2;
+  if (bpm > 90 && bpm < 130) altRockScore += 1;
+  if (chordProg.changeRate > 0.3) altRockScore += 1;
+
+  // Electronic/Dance
+  if (sf.energyVariance > 0.35) electroScore += 2;
+  if (sf.onsetDensity > 0.35) electroScore += 2;
+  if (sf.brightness > 0.3) electroScore += 1;
+  if (bpm > 115 && bpm < 140) electroScore += 2;
+
+  // Synthwave
+  if (sf.onsetDensity > 0.3 && sf.energyVariance < 0.4) synthwaveScore += 2;
+  if (isMinor) synthwaveScore += 2;
+  if (bpm >= 85 && bpm <= 115) synthwaveScore += 2;
+  if (sf.brightness > 0.4) synthwaveScore += 1; // Bright synths
+
+  // Hip-Hop / Rap
+  if (sf.onsetDensity > 0.45) hipHopScore += 3; // vocal/beat heavy
+  if (sf.brightness < 0.4) hipHopScore += 2; // bass heavy
+  if (bpm >= 75 && bpm <= 105) hipHopScore += 2;
+  if (chordProg.changeRate < 0.3) hipHopScore += 1; // loop based
+
+  // Acoustic/Folk
+  if (sf.spectralFlux < 0.25) acousticScore += 3;
+  if (sf.zcr < 0.08) acousticScore += 2;
+  if (sf.energyVariance < 0.3) acousticScore += 1;
+  if (bpm < 110) acousticScore += 1;
+
+  // Pop/Orchestral
+  popScore += 3; // Base score
+  if (sf.brightness > 0.4) popScore += 1;
+  if (sf.energyVariance > 0.2) popScore += 1;
+  if (bpm > 80 && bpm < 130) popScore += 1;
+
+  const genres = [
+    { genre: "Rock / Metal", score: rockScore },
+    { genre: "Alt Rock / Indie", score: altRockScore },
+    { genre: "Electronic / Dance", score: electroScore },
+    { genre: "Synthwave", score: synthwaveScore },
+    { genre: "Hip-Hop / Rap", score: hipHopScore },
+    { genre: "Acoustic / Folk", score: acousticScore },
+    { genre: "Pop / Orchestral", score: popScore },
+  ];
+
+  // Emphasize the top genres using exponent
+  const total = genres.reduce((s, g) => s + Math.max(0, g.score) ** 1.5, 0) || 1;
+  const distribution = genres
+    .map(g => ({ genre: g.genre, value: Math.round(((Math.max(0, g.score) ** 1.5) / total) * 100) }))
+    .filter(g => g.value > 0)
+    .sort((a, b) => b.value - a.value);
+
+  // Fix rounding
+  const sum = distribution.reduce((s, d) => s + d.value, 0);
+  if (sum !== 100 && distribution.length > 0) {
+    distribution[0].value += 100 - sum;
   }
-  if (sf.energyVariance > 0.4 && sf.onsetDensity > 0.4 && sf.brightness > 0.3) {
-    return "Electronic/Dance";
-  }
-  if (sf.spectralFlux < 0.25 && sf.zcr < 0.1 && sf.energyVariance < 0.3) {
-    return "Acoustic/Folk";
-  }
-  return "Pop/Orchestral";
+
+  return { style: distribution[0]?.genre || "Pop / Orchestral", distribution };
 }
 
 const MOOD_COLORS: Record<string, string> = {
@@ -421,9 +490,11 @@ function classifyMood(
   intervals: number[],
   sf: SpectralFeatures,
   chordProg: ChordProgressionFeatures
-): { primary: string; confidence: number; distribution: MoodDistribution[]; valence: number; arousal: number; style: string } {
+): { primary: string; confidence: number; distribution: MoodDistribution[]; valence: number; arousal: number; style: string; genres: GenreDistribution[] } {
 
-  const style = detectMusicStyle(sf, bpm);
+  const genreData = detectGenreDistribution(sf, bpm, keyInfo, chordProg);
+  const style = genreData.style;
+  const genres = genreData.distribution;
 
   // Base Features
   const isMinor = keyInfo.mode === "Minor";
@@ -644,9 +715,41 @@ function classifyMood(
     score: scorer(), // 0 = truly absent, no soft floor
   })).filter(m => m.score > 0); // completely remove zero-score moods
 
+  const RELATED_MOODS: Record<string, string[]> = {
+    Energetic: ["Happy", "Catchy", "Groovy", "Epic"],
+    Happy: ["Catchy", "Energetic", "Dreamy", "Groovy"],
+    Groovy: ["Energetic", "Catchy", "Happy"],
+    Catchy: ["Happy", "Groovy", "Energetic"],
+    Epic: ["Intense", "Dramatic", "Tense", "Energetic"],
+    Calm: ["Dreamy", "Romantic", "Nostalgic"],
+    Dreamy: ["Calm", "Romantic", "Nostalgic"],
+    Romantic: ["Dreamy", "Calm", "Nostalgic"],
+    Nostalgic: ["Bittersweet", "Calm", "Dreamy"],
+    Bittersweet: ["Nostalgic", "Melancholy", "Romantic"],
+    Melancholy: ["Sad", "Bittersweet", "Solemn"],
+    Sad: ["Melancholy", "Solemn", "Dark"],
+    Solemn: ["Sad", "Melancholy", "Dark"],
+    Tense: ["Dramatic", "Dark", "Intense"],
+    Dramatic: ["Tense", "Epic", "Intense"],
+    Dark: ["Tense", "Solemn", "Sad"],
+    Intense: ["Epic", "Dramatic", "Tense"],
+  };
+
+  if (scored.length > 0 && scored.length < 3) {
+    scored.sort((a,b) => b.score - a.score);
+    const primaryName = scored[0].mood;
+    const related = RELATED_MOODS[primaryName] || [];
+    for (const rel of related) {
+      if (scored.length >= 3) break;
+      if (!scored.find(m => m.mood === rel)) {
+        scored.push({ mood: rel, score: 1 }); // Give a small score
+      }
+    }
+  }
+
   // Guard: if nothing scored (extremely sparse audio), fall back to a neutral result
   if (scored.length === 0) {
-    return { primary: "Calm", confidence: 50, distribution: [{ mood: "Calm", value: 100, color: MOOD_COLORS["Calm"] }], valence: 0, arousal: 0, style };
+    return { primary: "Calm", confidence: 50, distribution: [{ mood: "Calm", value: 60, color: MOOD_COLORS["Calm"] }, { mood: "Dreamy", value: 30, color: MOOD_COLORS["Dreamy"] }, { mood: "Romantic", value: 10, color: MOOD_COLORS["Romantic"] }], valence: 0, arousal: 0, style, genres };
   }
 
   // Calculate faux valence and arousal based on the winner for UI backward compatibility
@@ -676,15 +779,25 @@ function classifyMood(
     default: valence = 0.0; arousal = 0.0;
   }
 
-  const totalScore = scored.reduce((s, m) => s + m.score ** 2, 0); // Square to emphasize winners
+  const totalScore = scored.reduce((s, m) => s + m.score ** 1.5, 0); 
   const distribution: MoodDistribution[] = scored
     .map(m => ({
       mood: m.mood,
-      value: Math.round(((m.score ** 2) / totalScore) * 100),
+      value: Math.round(((m.score ** 1.5) / totalScore) * 100),
       color: MOOD_COLORS[m.mood] ?? "var(--accent-primary)",
     }))
     .filter(m => m.value > 0)
     .sort((a, b) => b.value - a.value);
+
+  // Enforce minimum 3 moods if we lost some due to rounding to 0
+  while (distribution.length < 3 && distribution.length < scored.length) {
+      const dropped = scored.find(s => !distribution.find(d => d.mood === s.mood));
+      if (dropped) {
+          distribution.push({ mood: dropped.mood, value: 1, color: MOOD_COLORS[dropped.mood] || "var(--accent-primary)" });
+      } else {
+          break;
+      }
+  }
 
   // Ensure values sum to 100
   const sum = distribution.reduce((s, d) => s + d.value, 0);
@@ -700,7 +813,8 @@ function classifyMood(
     distribution,
     valence,
     arousal,
-    style
+    style,
+    genres
   };
 }
 
@@ -882,7 +996,8 @@ async function extractVocalAudio(srcBuffer: AudioBuffer): Promise<Blob> {
 export async function analyzeAudio(
   file: File,
   config: AnalysisConfig,
-  onProgress: (p: number) => void
+  onProgress: (p: number) => void,
+  lang: "id" | "en" = "id"
 ): Promise<AnalysisResult> {
   const t0 = performance.now();
 
@@ -903,7 +1018,7 @@ export async function analyzeAudio(
   let songId = songIdRaw.replace(/[_-]+/g, ' ');
 
   // 2. Hapus kata-kata "sampah" hasil download (case-insensitive)
-  const fluffWords = /\b(audio|official|video|lyrics|lyric|hd|hq|128kbps|320kbps|kbps|mp3|original|music|y2meta|app)\b/gi;
+  const fluffWords = /\b(audio|official|video|lyrics|lyric|hd|hq|128kbps|320kbps|kbps|mp3|original|music|y2meta|app|live)\b/gi;
   songId = songId.replace(fluffWords, '');
 
   // 3. Bersihkan spasi ganda dan spasi di ujung teks
@@ -930,7 +1045,7 @@ export async function analyzeAudio(
         console.log('📻 [LRCLIB] Tidak ada synced lyrics — mencoba Groq Whisper...');
       }
     } catch (e: any) {
-      if (e?.name !== 'AbortError') console.error('[LRCLIB] Error:', e);
+      if (e?.name !== 'AbortError') console.warn('[LRCLIB] Error:', e.message || e);
       else console.warn('[LRCLIB] Timeout 12s.');
     }
 
@@ -960,7 +1075,7 @@ export async function analyzeAudio(
       return chunks2;
     } catch (e: any) {
       if (e?.name === 'AbortError') console.warn('[Whisper] Timeout 90s.');
-      else console.error('[Whisper] Error:', e);
+      else console.warn('[Whisper] Error:', e.message || e);
       return [];
     }
   })();
@@ -1331,12 +1446,16 @@ export async function analyzeAudio(
   // Generate Dynamic Narrative using LLM (Groq)
   let explanation = generateExplanation(keyInfo, bpm, mood, dominantNotes); // Fallback string
   let lyricMood = "Reflective"; // Default
+  let aiGenres: string[] = [];
   try {
     const plainLyrics = lyricsData.map(l => l.text).join('\n');
 
     // 15 second timeout for narrative generation
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15_000);
+
+    const songIdRaw = file.name.replace(/\.[^/.]+$/, '');
+    const songTitle = songIdRaw.replace(/[_-]+/g, ' ');
 
     const narrativeRes = await fetch('/api/narrative', {
       method: 'POST',
@@ -1348,7 +1467,10 @@ export async function analyzeAudio(
         mood: mood.primary,
         topSolfegge: dominantNotes[0]?.solfege || 'Unknown',
         lyrics: plainLyrics,
-      })
+        songTitle,
+        lang
+      }),
+      signal: controller.signal
     });
 
     if (narrativeRes.ok) {
@@ -1361,9 +1483,12 @@ export async function analyzeAudio(
       if (narrativeData.lyricMood) {
         lyricMood = narrativeData.lyricMood;
       }
+      if (Array.isArray(narrativeData.genres) && narrativeData.genres.length > 0) {
+        aiGenres = narrativeData.genres;
+      }
     }
-  } catch (err) {
-    console.error("Failed to generate narrative:", err);
+  } catch (err: any) {
+    console.warn("Failed to generate narrative:", err.message || err);
   }
 
   // ── Fuse audio mood + lyric sentiment for final distribution ──
@@ -1393,6 +1518,7 @@ export async function analyzeAudio(
     totalNotes: dominantNotes.reduce((s, n) => s + n.count, 0),
     dominantNotes,
     mood: fusedMood,
+    genres: aiGenres.length > 0 ? aiGenres : mood.genres.map(g => g.genre).slice(0, 3),
     lyricMood,
     chromagram: normalizedChroma.map((v, i) => ({ note: NOTE_NAMES[i], value: v })),
     explanation,

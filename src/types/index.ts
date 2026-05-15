@@ -30,9 +30,6 @@ export interface NoteDistribution {
 export interface MoodDistribution {
   mood: string;
   value: number;
-  color: string;
-}
-
 export interface ChromagramEntry {
   note: string;
   value: number;
@@ -42,6 +39,7 @@ export interface KeyInfo {
   root: string;
   mode: string;
   confidence: number;
+  midiRoot?: number; // MIDI note class 0-11 (C=0)
 }
 
 export interface MoodInfo {
@@ -60,6 +58,7 @@ export interface AnalysisResult {
   totalNotes: number;
   dominantNotes: NoteDistribution[];
   mood: MoodInfo;
+  genres?: string[];
   lyricMood?: string;
   chromagram: ChromagramEntry[];
   explanation: string;

@@ -1,6 +1,9 @@
 import { NextResponse } from 'next/server';
 import { redis } from '@/lib/redis';
 
+// Bypass local certificate expiration issues during fetch
+process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+
 // Next.js 15 Route Segment Config
 export const maxDuration = 120; // 120s — Groq Whisper needs more time for full songs
 
@@ -125,6 +128,7 @@ export async function POST(req: Request) {
       .replace(/video/gi, '')
       .replace(/audio/gi, '')
       .replace(/lyrics/gi, '')
+      .replace(/live/gi, '')
       .replace(/[^a-zA-Z0-9\s\-]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim();

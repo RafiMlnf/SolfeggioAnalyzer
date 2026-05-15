@@ -10,6 +10,8 @@ import { AnalysisState, AudioFileInfo, AnalysisResult, AnalysisConfig } from "@/
 import { analyzeAudio } from "@/lib/audioEngine";
 import { useAudioPlayer } from "@/hooks/useAudioPlayer";
 
+import { useLang } from "@/context/LanguageContext";
+
 const DEFAULT_CONFIG: AnalysisConfig = {
   fftSize: 8192,
   windowType: "hann",
@@ -21,6 +23,7 @@ const DEFAULT_CONFIG: AnalysisConfig = {
 };
 
 export default function HomePage() {
+  const { lang } = useLang();
   const [analysisState, setAnalysisState] = useState<AnalysisState>("idle");
   const [audioFile,     setAudioFile]     = useState<AudioFileInfo | null>(null);
   const [analysisResult,setAnalysisResult]= useState<AnalysisResult | null>(null);
@@ -61,7 +64,7 @@ export default function HomePage() {
     setAnalysisState("processing");
     setProgress(0);
     try {
-      const result = await analyzeAudio(audioFile.file, config, setProgress);
+      const result = await analyzeAudio(audioFile.file, config, setProgress, lang);
       setAnalysisResult(result);
       setAnalysisState("complete");
     } catch (err) {

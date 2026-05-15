@@ -2,6 +2,8 @@
 
 import { useRef, useCallback } from "react";
 import { AnalysisState, AudioFileInfo, AnalysisConfig } from "@/types";
+import { useLang } from "@/context/LanguageContext";
+import { T } from "@/lib/i18n";
 
 interface LeftPanelProps {
   audioFile: AudioFileInfo | null;
@@ -22,6 +24,8 @@ export default function LeftPanel({
   onFileUpload,
   onAnalyze,
 }: LeftPanelProps) {
+  const { lang } = useLang();
+  const t = T[lang];
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const formatSize = (bytes: number) => {
@@ -58,7 +62,7 @@ export default function LeftPanel({
       {/* FILE INPUT */}
       <div className="panel-section">
         <div className="panel-section__header">
-          <span className="panel-section__title">◈ Audio Source</span>
+          <span className="panel-section__title">◈ {t.audioSource}</span>
           <span className="panel-section__toggle">▾</span>
         </div>
         <div className="panel-section__body">
@@ -84,15 +88,15 @@ export default function LeftPanel({
                 <div className="upload-zone__text" style={{ color: "var(--text-primary)" }}>
                   {audioFile.name}
                 </div>
-                <div className="upload-zone__formats">Click to change file</div>
+                <div className="upload-zone__formats">{t.clickChange}</div>
               </>
             ) : (
               <>
                 <div className="upload-zone__icon">⬆</div>
                 <div className="upload-zone__text">
-                  Drop <span className="upload-zone__text--accent">MP3/WAV</span> here
+                  {t.dropText} <span className="upload-zone__text--accent">MP3/WAV</span> {t.here}
                 </div>
-                <div className="upload-zone__formats">or click to browse</div>
+                <div className="upload-zone__formats">{t.orClick}</div>
               </>
             )}
           </div>
@@ -103,35 +107,35 @@ export default function LeftPanel({
       {audioFile && (
         <div className="panel-section">
           <div className="panel-section__header">
-            <span className="panel-section__title">◈ File Metadata</span>
+            <span className="panel-section__title">◈ {t.fileMetadata}</span>
             <span className="panel-section__toggle">▾</span>
           </div>
           <div className="panel-section__body">
             <div className="file-info">
               <div className="file-info__row">
-                <span className="file-info__label">Format</span>
+                <span className="file-info__label">{t.format}</span>
                 <span className="file-info__value">
                   {audioFile.type === "audio/mpeg" ? "MP3" : "WAV"}
                 </span>
               </div>
               <div className="file-info__row">
-                <span className="file-info__label">Size</span>
+                <span className="file-info__label">{t.size}</span>
                 <span className="file-info__value">{formatSize(audioFile.size)}</span>
               </div>
               <div className="file-info__row">
-                <span className="file-info__label">Duration</span>
+                <span className="file-info__label">{t.duration}</span>
                 <span className="file-info__value">
-                  {audioFile.duration > 0 ? formatTime(audioFile.duration) : "Decoding..."}
+                  {audioFile.duration > 0 ? formatTime(audioFile.duration) : t.decoding}
                 </span>
               </div>
               <div className="file-info__row">
-                <span className="file-info__label">Sample Rate</span>
+                <span className="file-info__label">{t.sampleRate}</span>
                 <span className="file-info__value">
                   {audioFile.sampleRate > 0 ? `${audioFile.sampleRate} Hz` : "—"}
                 </span>
               </div>
               <div className="file-info__row">
-                <span className="file-info__label">Channels</span>
+                <span className="file-info__label">{t.channels}</span>
                 <span className="file-info__value">
                   {audioFile.channels > 0
                     ? `${audioFile.channels} (${audioFile.channels === 1 ? "Mono" : "Stereo"})`
@@ -146,7 +150,7 @@ export default function LeftPanel({
       {/* ANALYSIS PARAMS */}
       <div className="panel-section">
         <div className="panel-section__header">
-          <span className="panel-section__title">◈ Analysis Config</span>
+          <span className="panel-section__title">◈ {t.analysisConfig}</span>
           <span className="panel-section__toggle">▾</span>
         </div>
         <div className="panel-section__body">
@@ -158,10 +162,10 @@ export default function LeftPanel({
                 value={config.fftSize}
                 onChange={(e) => onConfigChange({ ...config, fftSize: Number(e.target.value) as any })}
               >
-                <option value="2048">2048 (Fast)</option>
+                <option value="2048">2048 ({lang === "id" ? "Cepat" : "Fast"})</option>
                 <option value="4096">4096</option>
-                <option value="8192">8192 (Balanced)</option>
-                <option value="16384">16384 (Detailed)</option>
+                <option value="8192">8192 ({lang === "id" ? "Seimbang" : "Balanced"})</option>
+                <option value="16384">16384 ({lang === "id" ? "Detail" : "Detailed"})</option>
               </select>
             </div>
             <div className="param-row">
@@ -177,7 +181,7 @@ export default function LeftPanel({
               </select>
             </div>
             <div className="param-row" style={{ marginTop: 8 }}>
-              <span className="param-row__label" style={{ color: "var(--accent-primary)" }}>Auto Freq Range</span>
+              <span className="param-row__label" style={{ color: "var(--accent-primary)" }}>{t.autoFreqRange}</span>
               <input
                 type="checkbox"
                 checked={config.autoFreq}
@@ -215,7 +219,7 @@ export default function LeftPanel({
             )}
             {config.autoFreq && (
               <div style={{ fontSize: "8px", color: "var(--text-dim)", marginTop: "4px", lineHeight: 1.4 }}>
-                AI will automatically detect the optimal frequency range to analyze based on the audio brightness.
+                {t.autoFreqDesc}
               </div>
             )}
           </div>
@@ -236,7 +240,7 @@ export default function LeftPanel({
                 justifyContent: "space-between",
               }}
             >
-              <span>Processing...</span>
+              <span>{t.processingText}</span>
               <span>{Math.round(progress)}%</span>
             </div>
             <div className="progress-bar">
@@ -249,7 +253,7 @@ export default function LeftPanel({
             disabled={!audioFile}
             onClick={onAnalyze}
           >
-            {analysisState === "complete" ? "↻ Re-Analyze" : "▶ Analyze"}
+            {analysisState === "complete" ? t.reAnalyze : t.analyze}
           </button>
         )}
       </div>

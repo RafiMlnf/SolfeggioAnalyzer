@@ -59,18 +59,38 @@ export default function RightPanel({ analysisState, analysisResult }: RightPanel
       {activeTab === "mood" && (
         <div style={{ overflow: "auto", flex: 1 }}>
 
-          {/* Primary Mood Badge */}
+          {/* Combined Primary & Lyric Mood */}
           <div className="panel-section">
             <div className="panel-section__header">
-              <span className="panel-section__title">◈ {t.primaryMood}</span>
+              <span className="panel-section__title">◈ {t.primaryMood}{r.lyricMood ? t.lyricClass : ""}</span>
             </div>
             <div className="panel-section__body">
-              <div className="mood-badge mood-badge--primary">
-                <span>{MOOD_EMOJIS[r.mood.primary] ?? "♪"}</span>
-                <span>{r.mood.primary}</span>
+              <div style={{ display: "flex", gap: "8px", alignItems: "stretch" }}>
+                {/* Audio Mood (Left) */}
+                <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+                  <div className="mood-badge mood-badge--primary" style={{ flex: 1, height: "100%" }}>
+                    <span>{MOOD_EMOJIS[r.mood.primary] ?? "♪"}</span>
+                    <span>{r.mood.primary}</span>
+                  </div>
+                </div>
+
+                {/* Separator */}
+                {r.lyricMood && (
+                  <div style={{ width: "1px", background: "var(--border-default)" }} />
+                )}
+
+                {/* Lyric Mood (Right) */}
+                {r.lyricMood && (
+                  <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
+                    <div className="mood-badge mood-badge--primary" style={{ flex: 1, height: "100%", background: "rgba(139, 92, 246, 0.15)", color: "#c4b5fd", border: "1px solid rgba(139, 92, 246, 0.3)" }}>
+                      <span>{r.lyricMood === "Happy" ? "😊" : r.lyricMood === "Sad" ? "😢" : r.lyricMood === "Romantic" ? "💖" : r.lyricMood === "Angry" ? "😡" : "🤔"}</span>
+                      <span>{r.lyricMood}</span>
+                    </div>
+                  </div>
+                )}
               </div>
-              <div className="mood-confidence">
-                Confidence: {r.mood.confidence}%
+              <div className="mood-confidence" style={{ marginTop: "6px", textAlign: "center" }}>
+                Conf: {r.mood.confidence}%
                 {mood.valence !== undefined && (
                   <> &nbsp;|&nbsp; V:{mood.valence} A:{mood.arousal}</>
                 )}
@@ -109,30 +129,6 @@ export default function RightPanel({ analysisState, analysisResult }: RightPanel
             </div>
           </div>
 
-          {/* Lyric Mood */}
-          {r.lyricMood && (
-            <div className="panel-section">
-              <div className="panel-section__header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-                <span className="panel-section__title">◈ Klasifikasi Mood (Lirik)</span>
-                <span style={{
-                  fontSize: "6px",
-                  fontFamily: "var(--font-mono)",
-                  color: "var(--accent-primary)",
-                  background: "rgba(139,92,246,0.12)",
-                  border: "1px solid rgba(139,92,246,0.3)",
-                  borderRadius: "4px",
-                  padding: "1px 4px",
-                  letterSpacing: "0.05em",
-                }}>✦ Semantic AI</span>
-              </div>
-              <div className="panel-section__body">
-                <div className="mood-badge mood-badge--primary" style={{ background: "rgba(139, 92, 246, 0.15)", color: "#c4b5fd", border: "1px solid rgba(139, 92, 246, 0.3)" }}>
-                  <span>{r.lyricMood === "Happy" ? "😊" : r.lyricMood === "Sad" ? "😢" : r.lyricMood === "Romantic" ? "💖" : r.lyricMood === "Angry" ? "😡" : "🤔"}</span>
-                  <span>{r.lyricMood}</span>
-                </div>
-              </div>
-            </div>
-          )}
 
           {/* Mood Distribution */}
           <div className="panel-section">
@@ -153,6 +149,43 @@ export default function RightPanel({ analysisState, analysisResult }: RightPanel
               </div>
             </div>
           </div>
+
+          {/* Genre Tags */}
+          {r.genres && r.genres.length > 0 && (
+            <div className="panel-section">
+              <div className="panel-section__header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <span className="panel-section__title">◈ {t.genreIdent}</span>
+                <span style={{
+                  fontSize: "6px",
+                  fontFamily: "var(--font-mono)",
+                  color: "var(--accent-primary)",
+                  background: "rgba(99,102,241,0.12)",
+                  border: "1px solid rgba(99,102,241,0.3)",
+                  borderRadius: "4px",
+                  padding: "1px 4px",
+                  letterSpacing: "0.05em",
+                }}>{t.aiAnalyzed}</span>
+              </div>
+              <div className="panel-section__body">
+                <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                  {r.genres.map((g: string) => (
+                    <div key={g} style={{
+                      padding: "4px 8px",
+                      background: "var(--bg-input)",
+                      border: "1px solid var(--border-default)",
+                      borderRadius: "var(--radius-sm)",
+                      fontSize: "9px",
+                      color: "var(--text-primary)",
+                      fontWeight: 500,
+                      boxShadow: "0 2px 4px rgba(0,0,0,0.2)"
+                    }}>
+                      {g}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
 
           {/* Musical Metrics */}
           <div className="panel-section">
@@ -238,7 +271,7 @@ export default function RightPanel({ analysisState, analysisResult }: RightPanel
           {r.tensionPeaks && r.tensionPeaks.length > 0 && (
             <div className="panel-section">
               <div className="panel-section__header">
-                <span className="panel-section__title">◈ {lang === "id" ? "Puncak Tensi" : "Tension Peaks"}</span>
+                <span className="panel-section__title">◈ {t.tensionPeaks}</span>
               </div>
               <div className="panel-section__body">
                 <div className="file-info">
@@ -342,10 +375,10 @@ export default function RightPanel({ analysisState, analysisResult }: RightPanel
                 <div style={{ position:"absolute", top:"50%", left:0, width:"100%", height:"1px", background:"var(--border-default)" }} />
                 {/* Quadrant labels */}
                 {[
-                  { label: lang==="id" ? "Tegang" : "Tense",     top:"8%",    left:"8%" },
-                  { label: lang==="id" ? "Energik" : "Energetic", top:"8%",    right:"8%" },
-                  { label: lang==="id" ? "Sedih" : "Sad",         bottom:"8%", left:"8%" },
-                  { label: lang==="id" ? "Tenang" : "Calm",       bottom:"8%", right:"8%" },
+                  { label: t.tense,     top:"8%",    left:"8%" },
+                  { label: t.energetic, top:"8%",    right:"8%" },
+                  { label: t.sad,       bottom:"8%", left:"8%" },
+                  { label: t.calm,      bottom:"8%", right:"8%" },
                 ].map((q) => (
                   <span key={q.label} style={{ position:"absolute", fontFamily:"var(--font-mono)", fontSize:"7px", color:"var(--text-dim)", ...(q.top?{top:q.top}:{}), ...(q.bottom?{bottom:q.bottom}:{}), ...(q.left?{left:q.left}:{}), ...("right" in q?{right:q.right}:{}) }}>
                     {q.label}
@@ -353,10 +386,10 @@ export default function RightPanel({ analysisState, analysisResult }: RightPanel
                 ))}
                 {/* Axis labels */}
                 <span style={{ position:"absolute", top:"2%", left:"50%", transform:"translateX(-50%)", fontFamily:"var(--font-mono)", fontSize:"6px", color:"var(--text-dim)" }}>
-                  {lang==="id" ? "AROUSAL TINGGI" : "HIGH AROUSAL"}
+                  {t.highArousal}
                 </span>
                 <span style={{ position:"absolute", bottom:"2%", left:"50%", transform:"translateX(-50%)", fontFamily:"var(--font-mono)", fontSize:"6px", color:"var(--text-dim)" }}>
-                  {lang==="id" ? "AROUSAL RENDAH" : "LOW AROUSAL"}
+                  {t.lowArousal}
                 </span>
                 {/* Real data dot */}
                 {(() => {

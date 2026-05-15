@@ -1,6 +1,8 @@
 "use client";
 
 import { AnalysisState, AudioFileInfo, AnalysisResult } from "@/types";
+import { useLang } from "@/context/LanguageContext";
+import { T } from "@/lib/i18n";
 
 interface StatusBarProps {
   audioFile: AudioFileInfo | null;
@@ -9,6 +11,9 @@ interface StatusBarProps {
 }
 
 export default function StatusBar({ audioFile, analysisState, analysisResult }: StatusBarProps) {
+  const { lang } = useLang();
+  const t = T[lang];
+
   const formatSize = (bytes: number) => {
     if (bytes === 0) return "—";
     const mb = bytes / (1024 * 1024);
@@ -19,7 +24,7 @@ export default function StatusBar({ audioFile, analysisState, analysisResult }: 
     <div className="statusbar">
       <div className="statusbar__left">
         <span className="statusbar__item">
-          ◈ {audioFile ? audioFile.name : "No file loaded"}
+          ◈ {audioFile ? audioFile.name : t.noFile}
         </span>
         {audioFile && (
           <>
@@ -39,7 +44,7 @@ export default function StatusBar({ audioFile, analysisState, analysisResult }: 
         {analysisResult && (
           <>
             <span className="statusbar__item statusbar__item--accent">
-              KEY: {analysisResult.key.root} {analysisResult.key.mode}
+              {t.key.toUpperCase()}: {analysisResult.key.root} {analysisResult.key.mode}
             </span>
             <span className="statusbar__item statusbar__item--accent">
               BPM: {analysisResult.bpm}
@@ -47,9 +52,9 @@ export default function StatusBar({ audioFile, analysisState, analysisResult }: 
           </>
         )}
         <span className="statusbar__item">
-          {analysisState === "processing" ? "⟳ Processing" : "Ready"}
+          {analysisState === "processing" ? `⟳ ${t.processingText}` : t.ready}
         </span>
-        <span className="statusbar__item">Engine: YIN + K-S</span>
+        <span className="statusbar__item">{lang === "id" ? "Mesin" : "Engine"}: YIN + K-S</span>
       </div>
     </div>
   );
