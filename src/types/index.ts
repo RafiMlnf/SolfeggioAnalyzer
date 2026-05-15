@@ -30,6 +30,12 @@ export interface NoteDistribution {
 export interface MoodDistribution {
   mood: string;
   value: number;
+  color: string;
+}
+export interface GenreDistribution {
+  genre: string;
+  value: number;
+}
 export interface ChromagramEntry {
   note: string;
   value: number;
@@ -49,6 +55,7 @@ export interface MoodInfo {
   valence: number;
   arousal: number;
   style?: string;
+  genres?: GenreDistribution[];
 }
 
 export interface AnalysisResult {

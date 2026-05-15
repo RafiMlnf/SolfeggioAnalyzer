@@ -18,6 +18,11 @@ export default function TitleBar({ state }: TitleBarProps) {
   return (
     <div className="titlebar">
       <div className="titlebar__brand">
+        <img 
+          src="/icon.png" 
+          alt="Solfeggio Analyzer Icon" 
+          style={{ width: "16px", height: "16px", objectFit: "contain" }} 
+        />
         <span>Solfeggio Analyzer</span>
         <span style={{ color: "var(--text-dim)", fontWeight: 400 }}>v1.2.0</span>
       </div>

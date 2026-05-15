@@ -10,6 +10,9 @@ export const metadata: Metadata = {
   title: "Solfeggio Analyzer — Music Mood Analysis",
   description: "Advanced music notation heatmap analyzer. Upload MP3 to visualize pitch, detect key signatures, and classify emotional mood through solfeggio notation analysis.",
   keywords: ["music analysis","notation heatmap","mood detection","solfeggio","pitch detection","audio analyzer"],
+  icons: {
+    icon: "/icon.png",
+  },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

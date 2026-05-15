@@ -11,7 +11,7 @@
 import { fft, applyHannWindow, applyHammingWindow, applyBlackmanWindow, magnitudeSpectrum } from "./fft";
 import { detectKey, midiToSolfeggioRow, NOTE_NAMES } from "./keyDetection";
 import { findTopPitches, smoothHeatmap, freqToMidi } from "./pitchDetection";
-import { AnalysisConfig, AnalysisResult, NoteDistribution, MoodDistribution } from "@/types";
+import { AnalysisConfig, AnalysisResult, NoteDistribution, MoodDistribution, GenreDistribution } from "@/types";
 import { detectChordFromChroma, analyzeChordProgression, type ChordProgressionFeatures } from "./chordDetection";
 
 // ── Constants ──────────────────────────────────────────────────
