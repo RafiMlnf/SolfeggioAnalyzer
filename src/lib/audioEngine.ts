@@ -1004,9 +1004,10 @@ export async function analyzeAudio(
   // 1. Decode audio
   onProgress(5);
   const arrayBuffer = await file.arrayBuffer();
-  const audioCtx = new AudioContext();
-  const buffer = await audioCtx.decodeAudioData(arrayBuffer);
-  audioCtx.close();
+  // Use OfflineAudioContext for decoding to avoid "AudioContext encountered an error" 
+  // from hardware devices/renderers during the analysis phase.
+  const offlineCtx = new OfflineAudioContext(1, 1, 44100);
+  const buffer = await offlineCtx.decodeAudioData(arrayBuffer);
   onProgress(12);
 
   // 1.5 Fetch synced lyrics — LRCLIB first, Groq Whisper as fallback

@@ -47,8 +47,10 @@ export default function HomePage() {
     const reader = new FileReader();
     reader.onload = async (e) => {
       try {
-        const audioCtx = new AudioContext();
-        const buffer = await audioCtx.decodeAudioData(e.target?.result as ArrayBuffer);
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        // Use a dummy offline context for decoding to avoid hardware issues
+        const offlineCtx = new (window.OfflineAudioContext || (window as any).webkitOfflineAudioContext)(1, 1, 44100);
+        const buffer = await offlineCtx.decodeAudioData(e.target?.result as ArrayBuffer);
         setAudioFile(prev => prev
           ? { ...prev, duration: buffer.duration, sampleRate: buffer.sampleRate, channels: buffer.numberOfChannels }
           : null
